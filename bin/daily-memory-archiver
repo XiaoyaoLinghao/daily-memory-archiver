@@ -2,7 +2,7 @@
 set -eu
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 usage() {
-    echo "Usage: $(basename "$0") {init|init --defaults|archive|check|status|creds|help}" >&2
+    echo "Usage: $(basename "$0") {init|init --defaults|archive|logs|check|status|creds|help}" >&2
 }
 case "${1:-help}" in
     init|config)
@@ -15,6 +15,7 @@ case "${1:-help}" in
         shift
         exec bash "$ROOT/scripts/archive-engine.sh" archive "$@"
         ;;
+    logs|log-maintenance) exec bash "$ROOT/scripts/archive-engine.sh" log-maintenance ;;
     check|self-check) exec bash "$ROOT/scripts/self-check.sh" ;;
     status) exec bash "$ROOT/scripts/config-manager.sh" status ;;
     creds) exec bash "$ROOT/scripts/config-manager.sh" show ;;

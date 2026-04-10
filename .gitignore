@@ -5,3 +5,4 @@ config/.initialized
 config/.archive.lock
 config/.last_archive_meta.json
 config/.last_archive_ts
+config/.archive_merge_checkpoint.json

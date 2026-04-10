@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Daily Memory Archiver：读 sessions.json → 合并 jsonl（可选）→ 提取 → 云端摘要 → memory → sessions.compact
 # 用法: archive-engine.sh archive [--force] [--session <key>] [--agent <id>]
+#       archive-engine.sh log-maintenance
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,6 +12,9 @@ CONFIG_FILE="$CONFIG_DIR/config.yaml"
 LOCK_FILE="$CONFIG_DIR/.archive.lock"
 OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
 LOG_FILE="${DAILY_MEMORY_LOG:-$OPENCLAW_HOME/logs/daily-memory-archiver.log}"
+
+# shellcheck source=lib/log-maintenance.sh
+source "$SCRIPT_DIR/lib/log-maintenance.sh"
 
 LOCAL_EXTRACTOR="$SCRIPT_DIR/extractors/local-extractor.sh"
 CLOUD_SUMMARIZER="$SCRIPT_DIR/summarizers/cloud-summarizer.sh"
@@ -26,15 +30,15 @@ log() {
     printf '%s\n' "$line" >&2
 }
 
-rotate_log_if_needed() {
-    local max_bytes="${DAILY_MEMORY_LOG_MAX_BYTES:-0}"
-    [ "$max_bytes" -gt 0 ] 2>/dev/null || return 0
-    [ -f "$LOG_FILE" ] || return 0
-    local sz
-    sz=$(wc -c <"$LOG_FILE" 2>/dev/null || echo 0)
-    [ "$sz" -gt "$max_bytes" ] 2>/dev/null || return 0
-    mv "$LOG_FILE" "${LOG_FILE}.1"
-    log "[INFO] 日志已轮转（超过 DAILY_MEMORY_LOG_MAX_BYTES=$max_bytes）"
+run_log_maintenance() {
+    local pruned
+    pruned=$(daily_memory_prune_logs_by_age "$LOG_FILE" "${LOG_MAX_AGE_DAYS:-0}")
+    if [ "${pruned:-0}" -gt 0 ] 2>/dev/null; then
+        log "[INFO] 日志清理：按天龄删除 ${pruned} 个旧轮转文件（log_max_age_days=${LOG_MAX_AGE_DAYS:-0}）"
+    fi
+    if daily_memory_rotate_log_chain "$LOG_FILE" "${LOG_MAX_BYTES:-0}" "${LOG_KEEP_ROTATIONS:-5}"; then
+        log "[INFO] 日志已按大小轮转（log_max_bytes=${LOG_MAX_BYTES:-0} log_keep_rotations=${LOG_KEEP_ROTATIONS:-5}）"
+    fi
 }
 
 expand_tilde() {
@@ -50,6 +54,16 @@ yaml_scalar() {
     grep -E "^[[:space:]]*${key}:" "$CONFIG_FILE" 2>/dev/null | head -1 | \
         sed -E "s/^[[:space:]]*${key}:[[:space:]]*//" | \
         sed -E 's/^["'\'']//;s/["'\'']$//;s/[[:space:]]*$//;s/#.*$//'
+}
+
+# 供 jq --argjson：必须为正整数 JSON，避免空串/非数字触发 invalid JSON
+canonical_uint() {
+    local v="${1:-}" d="${2:-0}"
+    v=$(echo "$v" | tr -cd '0-9')
+    case "$v" in
+        ''|0) echo "$d" ;;
+        *) echo "$((10#$v))" ;;
+    esac
 }
 
 cloud_summarizer_enabled() {
@@ -82,14 +96,61 @@ load_config() {
     [ -n "$TRIGGER_MODE" ] || TRIGGER_MODE="threshold"
     MAX_INPUT_TOKENS="$(yaml_scalar max_input_tokens)"
     [ -n "$MAX_INPUT_TOKENS" ] || MAX_INPUT_TOKENS="${THRESHOLD_INPUT_TOKENS:-200000}"
+    MAX_INPUT_TOKENS=$(canonical_uint "$MAX_INPUT_TOKENS" 200000)
     CHECK_INTERVAL_MINUTES="$(yaml_scalar check_interval_minutes)"
     [ -n "$CHECK_INTERVAL_MINUTES" ] || CHECK_INTERVAL_MINUTES="5"
+    CHECK_INTERVAL_MINUTES=$(canonical_uint "$CHECK_INTERVAL_MINUTES" 5)
     COOLDOWN_MINUTES="$(yaml_scalar cooldown_minutes)"
-    [ -n "$COOLDOWN_MINUTES" ] || COOLDOWN_MINUTES="45"
+    COOLDOWN_MINUTES=$(canonical_uint "$COOLDOWN_MINUTES" 45)
     COMPACT_MAX_LINES="$(yaml_scalar max_lines)"
-    [ -n "$COMPACT_MAX_LINES" ] || COMPACT_MAX_LINES="400"
+    COMPACT_MAX_LINES=$(canonical_uint "$COMPACT_MAX_LINES" 400)
     MESSAGES_TO_ANALYZE="$(yaml_scalar messages_to_analyze)"
-    [ -n "$MESSAGES_TO_ANALYZE" ] || MESSAGES_TO_ANALYZE="50"
+    MESSAGES_TO_ANALYZE=$(canonical_uint "$MESSAGES_TO_ANALYZE" 50)
+    [ "$MESSAGES_TO_ANALYZE" -lt 1 ] && MESSAGES_TO_ANALYZE=50
+    [ "$COMPACT_MAX_LINES" -lt 1 ] && COMPACT_MAX_LINES=400
+
+    MIN_NEW_MESSAGES="$(yaml_scalar min_new_messages)"
+    MIN_NEW_MESSAGES=$(canonical_uint "$MIN_NEW_MESSAGES" 1)
+    [ "$MIN_NEW_MESSAGES" -lt 1 ] && MIN_NEW_MESSAGES=1
+
+    MAX_CLOUD_SUMMARY_CHUNKS="$(yaml_scalar max_cloud_summary_chunks)"
+    MAX_CLOUD_SUMMARY_CHUNKS=$(canonical_uint "$MAX_CLOUD_SUMMARY_CHUNKS" 20)
+    [ "$MAX_CLOUD_SUMMARY_CHUNKS" -lt 1 ] && MAX_CLOUD_SUMMARY_CHUNKS=20
+
+    CHUNK_CLOUD_RAW="$(yaml_scalar chunk_cloud_summary)"
+    if [ -z "$CHUNK_CLOUD_RAW" ]; then
+        CHUNK_CLOUD_SUMMARY=1
+    else
+        case "$(echo "$CHUNK_CLOUD_RAW" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
+            true|1|yes|on) CHUNK_CLOUD_SUMMARY=1 ;;
+            *) CHUNK_CLOUD_SUMMARY=0 ;;
+        esac
+    fi
+
+    COO_RAW="$(yaml_scalar compact_only_over_threshold)"
+    if [ -z "$COO_RAW" ]; then
+        COMPACT_ONLY_OVER_THRESHOLD=1
+    else
+        case "$(echo "$COO_RAW" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
+            false|0|no|off) COMPACT_ONLY_OVER_THRESHOLD=0 ;;
+            *) COMPACT_ONLY_OVER_THRESHOLD=1 ;;
+        esac
+    fi
+
+    MERGE_CHECKPOINT_FILE="$CONFIG_DIR/.archive_merge_checkpoint.json"
+
+    LOG_MAX_BYTES="$(yaml_scalar log_max_bytes)"
+    LOG_MAX_BYTES=$(canonical_uint "$LOG_MAX_BYTES" 0)
+    [ -n "${DAILY_MEMORY_LOG_MAX_BYTES:-}" ] && LOG_MAX_BYTES=$(canonical_uint "${DAILY_MEMORY_LOG_MAX_BYTES}" 0)
+
+    LOG_KEEP_ROTATIONS="$(yaml_scalar log_keep_rotations)"
+    LOG_KEEP_ROTATIONS=$(canonical_uint "$LOG_KEEP_ROTATIONS" 5)
+    [ "$LOG_KEEP_ROTATIONS" -lt 1 ] && LOG_KEEP_ROTATIONS=5
+    [ -n "${DAILY_MEMORY_LOG_KEEP_ROTATIONS:-}" ] && LOG_KEEP_ROTATIONS=$(canonical_uint "${DAILY_MEMORY_LOG_KEEP_ROTATIONS}" 5)
+
+    LOG_MAX_AGE_DAYS="$(yaml_scalar log_max_age_days)"
+    LOG_MAX_AGE_DAYS=$(canonical_uint "$LOG_MAX_AGE_DAYS" 0)
+    [ -n "${DAILY_MEMORY_LOG_MAX_AGE_DAYS:-}" ] && LOG_MAX_AGE_DAYS=$(canonical_uint "${DAILY_MEMORY_LOG_MAX_AGE_DAYS}" 0)
 
     if [ -n "${DAILY_MEMORY_MEMORY_DIR:-}" ]; then
         MEMORY_DIR="$(expand_tilde "$DAILY_MEMORY_MEMORY_DIR")"
@@ -154,6 +215,26 @@ resolve_usage_tokens() {
     '
 }
 
+merge_checkpoint_get() {
+    local sk="$1"
+    [ -f "$MERGE_CHECKPOINT_FILE" ] || { echo ""; return; }
+    jq -r --arg sk "$sk" '.[$sk] // empty' "$MERGE_CHECKPOINT_FILE" 2>/dev/null || echo ""
+}
+
+merge_checkpoint_bump_from_messages() {
+    local mf_json="$1"
+    [ -f "$MERGE_CHECKPOINT_FILE" ] || echo '{}' >"$MERGE_CHECKPOINT_FILE"
+    local merged
+    merged=$(echo "$mf_json" | jq -c '
+        group_by(.sk)
+        | map({ (.[0].sk): (map(.ts) | max) })
+        | add
+        // {}
+    ')
+    jq -s --argjson m "$merged" '.[0] * $m' "$MERGE_CHECKPOINT_FILE" >"${MERGE_CHECKPOINT_FILE}.new" \
+        && mv "${MERGE_CHECKPOINT_FILE}.new" "$MERGE_CHECKPOINT_FILE"
+}
+
 jsonl_to_messages_json() {
     local f="$1"
     jq -s '
@@ -169,18 +250,21 @@ jsonl_to_messages_json() {
     ' <"$f"
 }
 
-merged_jsonl_to_messages_json() {
-    local tmpdir sk f part_files i do_prefix
+# 参数：sk1 path1 ckpt1 sk2 path2 ckpt2 …（ckpt 为该 key 上次已归档的最大 timestamp ISO 串，空=首次全量）
+merged_jsonl_new_messages_json() {
+    local tmpdir sk f ck part_files i
     tmpdir=$(mktemp -d)
     part_files=()
     i=0
-    while [ "$#" -ge 2 ]; do
+    while [ "$#" -ge 3 ]; do
         sk="$1"
         f="$2"
-        shift 2
+        ck="$3"
+        shift 3
         [ -f "$f" ] || continue
-        jq -s --arg sk "$sk" '
+        jq -s --arg sk "$sk" --arg ck "$ck" '
           map(select(.type == "message" and (.message.role == "user" or .message.role == "assistant")))
+          | map(select( (($ck | length) == 0) or ((.timestamp // "") > $ck) ))
           | map({
               ts: (.timestamp // ""),
               role: .message.role,
@@ -200,14 +284,11 @@ merged_jsonl_to_messages_json() {
         echo '[]'
         return
     fi
-    do_prefix=false
-    [ ${#part_files[@]} -gt 1 ] && do_prefix=true
-    jq -s --argjson prefix "$do_prefix" '
+    jq -s --argjson nparts "${#part_files[@]}" '
       add
       | sort_by(.ts)
       | map(
-          if $prefix then .content = ("[" + .sk + "] " + .content) else . end
-          | {role, content}
+          if ($nparts > 1) then .content = ("[" + .sk + "] " + .content) else . end
         )
     ' "${part_files[@]}"
     rm -rf "$tmpdir"
@@ -269,10 +350,20 @@ run_compact() {
         log "[WARN] 未找到 openclaw CLI，跳过 compact"
         return 0
     }
-    local _ck
+    local _ck _u did=0
     for _ck in "${MERGE_PAIR_KEYS[@]}"; do
+        _u="${SESSION_USAGE_BY_KEY[$_ck]:-0}"
+        if [ "${COMPACT_ONLY_OVER_THRESHOLD:-1}" = "1" ]; then
+            if ! [ "${_u:-0}" -ge "$MAX_INPUT_TOKENS" ] 2>/dev/null; then
+                continue
+            fi
+        fi
+        did=1
         run_compact_one "$_ck"
     done
+    if [ "${COMPACT_ONLY_OVER_THRESHOLD:-1}" = "1" ] && [ "$did" = "0" ]; then
+        log "[INFO] compact_only_over_threshold：无 key ≥ $MAX_INPUT_TOKENS，跳过 sessions.compact"
+    fi
 }
 
 run_compact_one() {
@@ -291,15 +382,16 @@ run_compact_one() {
         gw_token=$(jq -r '.gateway.auth.token // empty' "$OPENCLAW_HOME/openclaw.json" 2>/dev/null || true)
     gw_extra=()
     [ -n "$gw_token" ] && [ "$gw_token" != "null" ] && gw_extra=(--token "$gw_token")
-    params=$(jq -n --arg k "$compact_target_key" --argjson m "${COMPACT_MAX_LINES:-400}" '{key:$k, maxLines:$m}')
+    params=$(jq -n --arg k "$compact_target_key" --argjson m "$(canonical_uint "$COMPACT_MAX_LINES" 400)" '{key:$k, maxLines:$m}')
     compact_log=$(mktemp)
     if openclaw gateway call sessions.compact --params "$params" --json --expect-final "${gw_extra[@]}" >"$compact_log" 2>&1; then
         cat "$compact_log" >>"$LOG_FILE"
         if jq -e '.ok == true' "$compact_log" >/dev/null 2>&1; then
             local c k r extra
-            c=$(jq -r '.compacted // "?"' "$compact_log")
-            k=$(jq -r '.kept // empty' "$compact_log")
-            r=$(jq -r '.reason // empty' "$compact_log")
+            # jq 的 a // b 在 a 为 false 时也会落到 b，不能用 .compacted // "?"
+            c=$(jq -r 'if (.compacted|type)=="boolean" then (.compacted|tostring) elif .compacted==null then "?" else (.compacted|tostring) end' "$compact_log")
+            k=$(jq -r 'if (.kept|type)=="number" then (.kept|tostring) else (.kept // empty | tostring) end' "$compact_log")
+            r=$(jq -r 'if (.reason|type)=="string" then .reason else empty end' "$compact_log")
             extra=""
             [ -n "$r" ] && extra=" reason=$r"
             log "[INFO] sessions.compact[$compact_target_key]：compacted=$c kept=${k:-?} maxLines=$COMPACT_MAX_LINES$extra"
@@ -317,8 +409,8 @@ run_compact_one() {
 }
 
 do_archive() {
-    rotate_log_if_needed
     load_config || exit 1
+    run_log_maintenance
     resolve_session_key
     load_merge_session_keys
     [ -n "${CLI_SESSION_KEY:-}" ] && SESSION_MERGE_KEYS=("$CLI_SESSION_KEY") && SESSION_KEY="$CLI_SESSION_KEY"
@@ -330,7 +422,8 @@ do_archive() {
 
     MERGE_PAIR_KEYS=()
     MERGE_PAIR_PATHS=()
-    local sk entry jsonl u rep_entry
+    declare -A SESSION_USAGE_BY_KEY=()
+    local sk entry jsonl u rep_entry pk_log
     for sk in "${SESSION_MERGE_KEYS[@]}"; do
         entry=$(jq -c --arg sk "$sk" '.[$sk] // empty' "$SESSIONS_JSON")
         [ -z "$entry" ] && {
@@ -342,6 +435,8 @@ do_archive() {
             log "[WARN] sessionFile 无效，跳过: $sk"
             continue
         }
+        u=$(resolve_usage_tokens "$entry")
+        SESSION_USAGE_BY_KEY["$sk"]=$u
         MERGE_PAIR_KEYS+=("$sk")
         MERGE_PAIR_PATHS+=("$jsonl")
     done
@@ -352,9 +447,12 @@ do_archive() {
 
     USAGE_TOKENS=0
     rep_entry=""
+    pk_log=""
     for sk in "${MERGE_PAIR_KEYS[@]}"; do
+        u="${SESSION_USAGE_BY_KEY[$sk]:-0}"
+        [ -n "$pk_log" ] && pk_log+=" | "
+        pk_log+="${sk}=${u}"
         entry=$(jq -c --arg sk "$sk" '.[$sk] // empty' "$SESSIONS_JSON")
-        u=$(resolve_usage_tokens "$entry")
         if [ "${u:-0}" -ge "${USAGE_TOKENS:-0}" ] 2>/dev/null; then
             USAGE_TOKENS=$u
             rep_entry="$entry"
@@ -367,25 +465,44 @@ do_archive() {
     TOTAL_FRESH=$(echo "$rep_entry" | jq -r '.totalTokensFresh // false')
     SESSION_MERGE_LABEL=$(IFS=','; echo "${MERGE_PAIR_KEYS[*]}")
 
-    log "[INFO] session_merge=[$SESSION_MERGE_LABEL] usage=$USAGE_TOKENS(max) input=$INPUT_TOKENS_RAW total=$TOTAL_TOKENS_RAW fresh=$TOTAL_FRESH trigger=$TRIGGER_MODE"
+    log "[INFO] session_merge=[$SESSION_MERGE_LABEL] usage_max=$USAGE_TOKENS | per_key: $pk_log | rep_input=$INPUT_TOKENS_RAW rep_total=$TOTAL_TOKENS_RAW fresh=$TOTAL_FRESH trigger=$TRIGGER_MODE"
 
-    local skip_write=0
     should_run_archive || exit 0
-    cooldown_blocks_write && skip_write=1
 
-    local merge_args messages_all msg_count messages_slice _i
+    local merge_args messages_all msg_count messages_slice _i ck
     merge_args=()
     for _i in "${!MERGE_PAIR_KEYS[@]}"; do
-        merge_args+=("${MERGE_PAIR_KEYS[$_i]}" "${MERGE_PAIR_PATHS[$_i]}")
+        ck=$(merge_checkpoint_get "${MERGE_PAIR_KEYS[$_i]}")
+        merge_args+=("${MERGE_PAIR_KEYS[$_i]}" "${MERGE_PAIR_PATHS[$_i]}" "$ck")
     done
-    messages_all=$(merged_jsonl_to_messages_json "${merge_args[@]}")
+    messages_all=$(merged_jsonl_new_messages_json "${merge_args[@]}")
     msg_count=$(echo "$messages_all" | jq 'length')
     if [ "${msg_count:-0}" -eq 0 ]; then
-        log "[WARN] 无 user/assistant 消息，跳过内容归档"
+        log "[INFO] 检查点之后无新增 user/assistant 消息，跳过合并与摘要"
         run_compact
         exit 0
     fi
-    messages_slice=$(echo "$messages_all" | jq --argjson take "$MESSAGES_TO_ANALYZE" '.[-($take):]')
+
+    if [ "${FORCE_RUN:-0}" != "1" ] && [ "${msg_count:-0}" -lt "$MIN_NEW_MESSAGES" ]; then
+        log "[INFO] 新增消息 ${msg_count} < min_new_messages=${MIN_NEW_MESSAGES}，累积后再归档（不写 memory、不推进检查点）"
+        run_compact
+        exit 0
+    fi
+
+    local skip_write=0
+    cooldown_blocks_write && skip_write=1
+
+    local messages_stripped total_new chunk_note PER_KEY_USAGE_ROW
+    messages_stripped=$(echo "$messages_all" | jq 'map({role, content})')
+    total_new=$(echo "$messages_stripped" | jq 'length')
+    messages_slice=$(echo "$messages_stripped" | jq --argjson take "$MESSAGES_TO_ANALYZE" '.[-($take):]')
+    chunk_note="本地关键词：尾部 ${MESSAGES_TO_ANALYZE} 条；本周期新增 ${total_new} 条。"
+
+    PER_KEY_USAGE_ROW=""
+    for sk in "${MERGE_PAIR_KEYS[@]}"; do
+        [ -n "$PER_KEY_USAGE_ROW" ] && PER_KEY_USAGE_ROW+=" / "
+        PER_KEY_USAGE_ROW+="${sk}=${SESSION_USAGE_BY_KEY[$sk]}"
+    done
 
     local insights cloud_block trigger_reason
     if [ "${FORCE_RUN:-0}" = "1" ]; then trigger_reason="手动强制归档"
@@ -400,20 +517,53 @@ do_archive() {
     if [ "$skip_write" = "0" ]; then
         insights=$("$LOCAL_EXTRACTOR" - <<<"$messages_slice" "$MESSAGES_TO_ANALYZE" || true)
         if cloud_summarizer_enabled && [ -f "$CONFIG_DIR/credentials.enc" ]; then
-            local tmp_plain api_url api_tok model_id
+            local tmp_plain api_url api_tok model_id cloud_out full_chunks used_chunks chunk_start_ci cidx start chunk_json clen cend sect
             tmp_plain=$(mktemp)
             chmod 600 "$tmp_plain"
-            echo "$messages_slice" | jq -r '.[] | "\(.role): \(.content)"' >"$tmp_plain"
             if API_JSON=$("$GET_CREDS" 2>>"$LOG_FILE"); then
                 api_url=$(echo "$API_JSON" | jq -r .api_url)
                 api_tok=$(echo "$API_JSON" | jq -r .api_token)
                 model_id=$(echo "$API_JSON" | jq -r .model)
                 if [ -z "$api_url" ] || [ "$api_url" = "null" ] || [ -z "$api_tok" ] || [ "$api_tok" = "null" ] || [ -z "$model_id" ] || [ "$model_id" = "null" ]; then
                     cloud_block="- *（凭证字段不完整，请 save-json）*"
-                elif cloud_out=$("$CLOUD_SUMMARIZER" --file "$tmp_plain" "openai-compatible" "$model_id" "$api_url" "$api_tok" 2>>"$LOG_FILE"); then
-                    cloud_block=$cloud_out
+                elif [ "$CHUNK_CLOUD_SUMMARY" = "1" ] && [ "$total_new" -gt "$MESSAGES_TO_ANALYZE" ]; then
+                    full_chunks=$(( (total_new + MESSAGES_TO_ANALYZE - 1) / MESSAGES_TO_ANALYZE ))
+                    chunk_start_ci=0
+                    used_chunks=$full_chunks
+                    if [ "$full_chunks" -gt "$MAX_CLOUD_SUMMARY_CHUNKS" ]; then
+                        used_chunks=$MAX_CLOUD_SUMMARY_CHUNKS
+                        chunk_start_ci=$(( full_chunks - MAX_CLOUD_SUMMARY_CHUNKS ))
+                        log "[WARN] 云端分块共 ${full_chunks} 段；仅摘要最近 ${used_chunks} 段（每段 ${MESSAGES_TO_ANALYZE} 条），更早的新增未送 LLM"
+                    fi
+                    chunk_note="云端分块：每段 ${MESSAGES_TO_ANALYZE} 条；本次第 $((chunk_start_ci + 1))–$((chunk_start_ci + used_chunks)) 段 / 共 ${full_chunks} 段；本周期新增 ${total_new} 条"
+                    cloud_block=""
+                    cidx=0
+                    while [ "$cidx" -lt "$used_chunks" ]; do
+                        start=$(( (chunk_start_ci + cidx) * MESSAGES_TO_ANALYZE ))
+                        chunk_json=$(echo "$messages_stripped" | jq --argjson s "$start" --argjson n "$MESSAGES_TO_ANALYZE" '.[$s:$s+$n]')
+                        clen=$(echo "$chunk_json" | jq 'length')
+                        cend=$((start + clen - 1))
+                        sect=$((cidx + 1))
+                        echo "$chunk_json" | jq -r '.[] | "\(.role): \(.content)"' >"$tmp_plain"
+                        if cloud_out=$("$CLOUD_SUMMARIZER" --file "$tmp_plain" "openai-compatible" "$model_id" "$api_url" "$api_tok" 2>>"$LOG_FILE"); then
+                            cloud_block+="##### 云端段 ${sect}/${used_chunks}（消息序号 ${start}–${cend}）"$'\n\n'"$cloud_out"$'\n\n'
+                        else
+                            cloud_block+="- *（段 ${sect}/${used_chunks} 摘要失败）*"$'\n\n'
+                        fi
+                        cidx=$((cidx + 1))
+                    done
+                    log "[INFO] 云端分块摘要完成 ${used_chunks} 段（本周期新增 ${total_new} 条）"
                 else
-                    cloud_block="- *（云端摘要失败，见日志）*"
+                    if [ "$total_new" -gt "$MESSAGES_TO_ANALYZE" ]; then
+                        log "[WARN] 本周期新增 ${total_new} 条，chunk_cloud_summary 关闭：云端仅摘要最后 ${MESSAGES_TO_ANALYZE} 条"
+                        chunk_note="本地：尾部 ${MESSAGES_TO_ANALYZE} 条。云端：仅最后 ${MESSAGES_TO_ANALYZE} 条。本周期新增 ${total_new} 条（未开分块）。"
+                    fi
+                    echo "$messages_slice" | jq -r '.[] | "\(.role): \(.content)"' >"$tmp_plain"
+                    if cloud_out=$("$CLOUD_SUMMARIZER" --file "$tmp_plain" "openai-compatible" "$model_id" "$api_url" "$api_tok" 2>>"$LOG_FILE"); then
+                        cloud_block=$cloud_out
+                    else
+                        cloud_block="- *（云端摘要失败，见日志）*"
+                    fi
                 fi
             else
                 cloud_block="- *（get-cloud-creds 失败；检查 .master_key 与 credentials.enc）*"
@@ -451,11 +601,14 @@ do_archive() {
             echo "|:---|:---|"
             echo "| **Session Key(s)** | $SESSION_MERGE_LABEL |"
             echo "| **Agent** | $AGENT_ID |"
-            echo "| **上下文用量** | $USAGE_TOKENS（totalTokens 优先，totalTokensFresh=$TOTAL_FRESH；input=$INPUT_TOKENS_RAW） |"
+            echo "| **各 Key 用量（total/input 规则同 OpenClaw）** | $PER_KEY_USAGE_ROW |"
+            echo "| **代表会话 input/total/fresh** | input=$INPUT_TOKENS_RAW total=$TOTAL_TOKENS_RAW fresh=$TOTAL_FRESH（usage_max=$USAGE_TOKENS 的 key） |"
+            echo "| **本周期新增消息** | $total_new（检查点之后合并） |"
+            echo "| **摘要窗口说明** | $chunk_note |"
             echo "| **触发** | $ts_local |"
             echo "| **原因** | $trigger_reason |"
             echo "| **trigger_mode** | $TRIGGER_MODE |"
-            echo "| **分析条数** | $MESSAGES_TO_ANALYZE |"
+            echo "| **messages_to_analyze** | $MESSAGES_TO_ANALYZE |"
             echo ""
             echo "$insights"
             echo "---"
@@ -467,17 +620,32 @@ do_archive() {
             echo "---"
             echo ""
             echo "#### 归档动作"
-            echo "- [x] Daily Memory 归档 / 本地提取 / 云端摘要 / compact 调用"
+            echo "- [x] Daily Memory 归档（仅本周期新增合并） / 本地提取 / 云端摘要 / 仅超限 key 的 sessions.compact"
             echo ""
         } >>"$fpath"
+        merge_checkpoint_bump_from_messages "$messages_all"
         date +%s >"$CONFIG_DIR/.last_archive_ts"
-        jq -n --arg sk "$SESSION_MERGE_LABEL" --argjson u "$USAGE_TOKENS" --argjson ts "$(date +%s)" \
-            '{session_key:$sk, usage_tokens:$u, ts:$ts}' >"$CONFIG_DIR/.last_archive_meta.json"
-        log "[INFO] 已写入 $fpath"
+        local per_key_json sk_u uu
+        per_key_json="{}"
+        for sk_u in "${MERGE_PAIR_KEYS[@]}"; do
+            uu=$(canonical_uint "${SESSION_USAGE_BY_KEY[$sk_u]:-0}" 0)
+            per_key_json=$(jq -c --arg k "$sk_u" --argjson v "$uu" '. + {($k): $v}' <<<"$per_key_json")
+        done
+        jq -n --arg sk "$SESSION_MERGE_LABEL" \
+            --argjson u "$(canonical_uint "$USAGE_TOKENS" 0)" \
+            --argjson ts "$(date +%s)" \
+            --argjson pk "$per_key_json" \
+            '{session_key:$sk, usage_tokens:$u, ts:$ts, per_key_usage:$pk}' >"$CONFIG_DIR/.last_archive_meta.json"
+        log "[INFO] 已写入 $fpath；已更新合并检查点 $MERGE_CHECKPOINT_FILE"
     else
         log "[INFO] 跳过 memory（冷却）"
     fi
     run_compact
+}
+
+do_log_maintenance_only() {
+    load_config || exit 1
+    run_log_maintenance
 }
 
 with_lock() {
@@ -510,10 +678,14 @@ main_cli() {
             exec 9>>"$LOCK_FILE"
             with_lock do_archive
             ;;
+        log-maintenance|logs)
+            do_log_maintenance_only
+            ;;
         help)
             echo "Usage: $0 archive [--force] [--session <key>] [--agent <id>]"
+            echo "       $0 log-maintenance   # 仅执行日志天龄清理 + 按大小轮转（读 config.yaml）"
             echo "多通道: session.merge_jsonl_keys 或 DAILY_MEMORY_MERGE_KEYS"
-            echo "日志轮转: DAILY_MEMORY_LOG_MAX_BYTES（字节）"
+            echo "日志: logging.log_max_bytes / log_keep_rotations / log_max_age_days；环境变量见 README"
             ;;
         *)
             echo "Unknown: $cmd" >&2

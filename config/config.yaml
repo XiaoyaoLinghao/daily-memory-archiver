@@ -8,7 +8,9 @@ openclaw:
 session:
   key: ""
   # 多通道：merge_jsonl_keys 按 timestamp 合并后再分析
-  merge_jsonl_keys: []
+  merge_jsonl_keys:
+    - "agent:main:main"
+    - "agent:main:feishu:direct:ou_54f29a98dec7d7b397ace247d534fecf"
 
 archive:
   trigger_mode: "threshold"
@@ -16,16 +18,29 @@ archive:
     max_input_tokens: 200000
     check_interval_minutes: 5
     cooldown_minutes: 45
+  # 新增消息少于该条数时不写 memory（不推进检查点），避免零星对话重复摘要；--force 仍立即归档
+  min_new_messages: 1
+  # true：仅对用量 ≥ max_input_tokens 的 session key 调用 sessions.compact
+  compact_only_over_threshold: true
   compact:
     max_lines: 400
 
 analyzer:
   messages_to_analyze: 50
+  # 本周期新增超过 messages_to_analyze 时按段多次调用云端摘要，避免只摘要尾部导致丢失
+  chunk_cloud_summary: true
+  max_cloud_summary_chunks: 20
   cloud_summarizer:
     enabled: true
+
+# 日志：每次 archive 开头执行；亦可单独 daily-memory-archiver logs
+logging:
+  log_max_bytes: 10485760
+  log_keep_rotations: 5
+  log_max_age_days: 30
 
 output:
   memory_dir: "/home/zhy765664161/.openclaw/workspace/memory"
 
-skill_version: "1.3.0"
-config_version: "5"
+skill_version: "1.4.0"
+config_version: "6"

@@ -5,9 +5,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../lib/conversation-noise.sh
 source "$SCRIPT_DIR/../lib/conversation-noise.sh"
 
-TAKE="${1:-50}"
+raw_take="${1:-50}"
+t=$(printf '%s' "$raw_take" | tr -cd '0-9')
+[ -n "$t" ] && [ "$((10#$t))" -ge 1 ] 2>/dev/null || t=50
 msgs=$(cat)
-slice=$(echo "$msgs" | jq --argjson t "$TAKE" 'if length > $t then .[-($t):] else . end')
+slice=$(echo "$msgs" | jq --argjson t "$t" 'if length > $t then .[-($t):] else . end')
 
 decisions=""
 plans=""
