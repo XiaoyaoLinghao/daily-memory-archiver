@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -eu
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+usage() {
+    echo "Usage: $(basename "$0") {init|init --defaults|archive|check|status|creds|help}" >&2
+}
+case "${1:-help}" in
+    init|config)
+        if [ "${2:-}" = "--defaults" ]; then
+            exec bash "$ROOT/scripts/config-manager.sh" init-defaults
+        fi
+        exec bash "$ROOT/scripts/config-manager.sh"
+        ;;
+    archive)
+        shift
+        exec bash "$ROOT/scripts/archive-engine.sh" archive "$@"
+        ;;
+    check|self-check) exec bash "$ROOT/scripts/self-check.sh" ;;
+    status) exec bash "$ROOT/scripts/config-manager.sh" status ;;
+    creds) exec bash "$ROOT/scripts/config-manager.sh" show ;;
+    help|-h|--help) usage; exit 0 ;;
+    *) usage; exit 2 ;;
+esac

@@ -1,0 +1,7 @@
+# 密钥与运行时状态（勿提交）
+config/.master_key
+config/credentials.enc
+config/.initialized
+config/.archive.lock
+config/.last_archive_meta.json
+config/.last_archive_ts
