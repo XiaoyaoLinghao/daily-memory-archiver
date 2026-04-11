@@ -1,7 +1,7 @@
 ---
 name: daily-memory-archiver
 description: |
-  Daily Memory Archiver v1.4.0 — OpenClaw 会话归档：按 session key 统计用量、检查点后仅合并新增消息、可选分块云端摘要、默认仅对超限 key 执行 sessions.compact。根目录 ~/.openclaw/skills/daily-memory-archiver。
+  Daily Memory Archiver v1.4.1 — OpenClaw 会话归档：按 session key 统计用量、检查点后仅合并新增消息、可选分块云端摘要、默认仅对超限 key 执行 sessions.compact。根目录 ~/.openclaw/skills/daily-memory-archiver。
 
   **必须读取本 Skill 时**：安装/配置 API、定时归档、credentials.enc、merge_jsonl_keys、检查点、pairing、多通道、get-cloud-creds、archive-engine。
 
@@ -12,7 +12,7 @@ description: |
 
 # Daily Memory Archiver
 
-**文档与实现版本：1.4.0**（`config.yaml` 中 `skill_version` 可与本文不一致时，以本文与脚本为准。）
+**文档与实现版本：1.4.1**（`config.yaml` 中 `skill_version` 可与本文不一致时，以本文与脚本为准。）
 
 ## 0. 核心思路
 
@@ -69,6 +69,14 @@ bash ~/.openclaw/skills/daily-memory-archiver/scripts/archive-engine.sh log-main
 日志默认：`~/.openclaw/logs/daily-memory-archiver.log`  
 可选轮转：环境变量 **`DAILY_MEMORY_LOG_MAX_BYTES`**（超过则改名为 `.1` 并新开）。
 
+**cron 与日志（推荐）**：**不要**再单独 `>> daily-memory-archiver-cron.log`；引擎已写入 **`$OPENCLAW_HOME/logs/daily-memory-archiver.log`**（轮转见 `logging.*`）。crontab 行尾使用 **`>/dev/null 2>&1`** 即可，避免与 stderr 叠成双份、也避免 cron 发空邮件。`log()` 仅在 **stderr 为终端**时镜像一行，便于本地手跑调试。
+
+```cron
+*/30 * * * * /完整路径/.openclaw/skills/daily-memory-archiver/bin/daily-memory-archiver archive >/dev/null 2>&1
+```
+
+（若 cron 环境未设 `HOME`，请在行首 `HOME=/你的家目录` 或写死路径。）
+
 ## 4. 多通道、阈值、检查点与摘要
 
 ### 4.1 `merge_jsonl_keys`
@@ -93,10 +101,12 @@ session:
 ### 4.2 用量与触发（`archive.trigger_mode`）
 
 - **按 key 统计**：每个 key 从 `sessions.json` 对应项读取用量（`totalTokens` / `inputTokens` 规则与 `resolve_usage_tokens` 一致）；日志中会输出 **`per_key: key=用量`**。
-- **是否执行本次 `archive` 主流程**（读 jsonl、合并、可能写 memory）由 **`trigger_mode`** 决定：
-  - **`threshold`（默认）**：至少有一个 key 的用量 **≥ `archive.threshold.max_input_tokens`** 时才继续；否则直接退出（可用 **`archive --force`** 跳过阈值）。
+- **是否执行本次 `archive` 主流程**（读 jsonl、合并、可能写 memory）由 **`trigger_mode`** 与可选的 **`archive.periodic_archive_minutes`** 共同决定：
+  - **`threshold`（默认）**：至少有一个 key 的用量 **≥ `archive.threshold.max_input_tokens`** 时进入主流程；**或**（当 **`periodic_archive_minutes > 0`** 且存在 **`config/.last_archive_ts`**）距**上次成功写入 memory**已满该分钟数时也会进入主流程，以便「对话不多但重要」时仍能补归档（见 4.4）。未达阈值且未到定期间隔则退出（可用 **`archive --force`**）。
   - **`scheduled`**：每次调用都进入后续步骤（适合纯定时扫增量）。
-  - **`hybrid`**：满足 **阈值** 或 **距上次归档超过 `check_interval_minutes`** 之一即运行。
+  - **`hybrid`**：满足 **阈值**、**`check_interval_minutes`** 间隔、或 **`periodic_archive_minutes`**（若配置且 &gt;0）之一即运行。
+
+**与 `sessions.compact` 的关系**：超阈值时照常尝试 **compact**（仍受 **`compact_only_over_threshold`**）；**仅因定期间隔**进入归档时，用量未超阈值则 **不会**对未超限 key 做 compact——与「半小时盯用量、两小时保底写 memory」一致。
 
 **说明**：在 `threshold` 下，“是否存在 key 超阈值”与“所有 key 用量取 max 再与阈值比较”在数学上等价；差别在于后续 **compact 只打超限 key**（见下）。
 
@@ -110,7 +120,7 @@ session:
 ### 4.4 本周期无新增 / 攒批（`archive.min_new_messages`）
 
 - 若检查点之后 **合并结果为 0 条**消息：不写 memory、不推进检查点；仍会按规则尝试 **compact**（仅超限 key）。
-- 若有新增但条数 **&lt; `min_new_messages`** 且 **未**使用 `--force`：不写 memory、不推进检查点（便于攒够一批再摘要，减轻“零星一句反复摘要”）。**`--force` 时忽略本条**，仍要求有 ≥1 条新增才会写内容（0 条仍会早退）。
+- 若有新增但条数 **&lt; `min_new_messages`** 且 **未**使用 `--force`：不写 memory、不推进检查点（便于攒够一批再摘要，减轻“零星一句反复摘要”）。**以下情况放宽本条**（有 ≥1 条新增即可写 memory）：**`--force`**、**用量已达阈值**、**由 `periodic_archive_minutes` / hybrid 定期间隔触发**（便于定时间隔内少量重要对话仍落盘）。
 
 ### 4.5 本地与云端摘要（`analyzer.*`）
 
@@ -124,6 +134,7 @@ session:
 ### 4.6 冷却（`archive.threshold.cooldown_minutes`）
 
 - 仅在 **`threshold`** 模式且 **`--force` 未开启**时生效：若与 **上次写入** 的 `usage_tokens` 相同且在冷却时间内，**跳过本次 memory 写入**，但仍可执行 **compact**。
+- **由 `periodic_archive_minutes` 触发的补归档**不受冷却挡写入（避免用量几乎不变时定期间隔永远不写 md）。
 
 ### 4.7 Compact（`archive.compact`）
 
@@ -152,6 +163,7 @@ archive:
     check_interval_minutes: 5
     cooldown_minutes: 45
   min_new_messages: 1
+  periodic_archive_minutes: 120   # 0=关闭；cron 可仍每 30m 调用 archive，由本项控制「至少每 2h 检查一次是否写 memory」
   compact_only_over_threshold: true
   compact:
     max_lines: 400
@@ -171,8 +183,8 @@ logging:
 output:
   memory_dir: "~/.openclaw/workspace/memory"
 
-skill_version: "1.4.0"
-config_version: "6"
+skill_version: "1.4.1"
+config_version: "7"
 ```
 
 ### 4.9 日志轮转与清理
@@ -222,6 +234,7 @@ Gateway 在 transcript **行数 ≤ max_lines（默认 400）** 时返回 **`com
 | `DAILY_MEMORY_LOG_KEEP_ROTATIONS` | 覆盖 `logging.log_keep_rotations` |
 | `DAILY_MEMORY_LOG_MAX_AGE_DAYS` | 覆盖 `logging.log_max_age_days`（`0` 关闭按天龄删备份） |
 | `DAILY_MEMORY_MERGE_KEYS` | 覆盖 merge 列表 |
+| `DAILY_MEMORY_PERIODIC_ARCHIVE_MINUTES` | 覆盖 `archive.periodic_archive_minutes`（`0` 关闭定期间隔补归档） |
 | `SKIP_SESSION_COMPACT` / `OPENCLAW_SKIP_COMPACT` | `1` 跳过 compact |
 | `ARCHIVE_MODE` | 与向导生成 YAML 相关 |
 | `MESSAGES_TO_ANALYZE` / `THRESHOLD_INPUT_TOKENS` 等 | 见 `config-manager` 模板 |

@@ -27,7 +27,10 @@ export PATH="/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 log() {
     local line="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
     printf '%s\n' "$line" >>"$LOG_FILE"
-    printf '%s\n' "$line" >&2
+    # 仅当 stderr 是终端时再镜像一行，避免 crontab 里 `2>&1 >>…-cron.log` 与 LOG_FILE 双份相同内容
+    if [ -t 2 ] 2>/dev/null; then
+        printf '%s\n' "$line" >&2
+    fi
 }
 
 run_log_maintenance() {
@@ -100,6 +103,9 @@ load_config() {
     CHECK_INTERVAL_MINUTES="$(yaml_scalar check_interval_minutes)"
     [ -n "$CHECK_INTERVAL_MINUTES" ] || CHECK_INTERVAL_MINUTES="5"
     CHECK_INTERVAL_MINUTES=$(canonical_uint "$CHECK_INTERVAL_MINUTES" 5)
+    PERIODIC_ARCHIVE_MINUTES="$(yaml_scalar periodic_archive_minutes)"
+    [ -n "${DAILY_MEMORY_PERIODIC_ARCHIVE_MINUTES:-}" ] && PERIODIC_ARCHIVE_MINUTES="${DAILY_MEMORY_PERIODIC_ARCHIVE_MINUTES}"
+    PERIODIC_ARCHIVE_MINUTES=$(canonical_uint "${PERIODIC_ARCHIVE_MINUTES:-}" 0)
     COOLDOWN_MINUTES="$(yaml_scalar cooldown_minutes)"
     COOLDOWN_MINUTES=$(canonical_uint "$COOLDOWN_MINUTES" 45)
     COMPACT_MAX_LINES="$(yaml_scalar max_lines)"
@@ -294,28 +300,82 @@ merged_jsonl_new_messages_json() {
     rm -rf "$tmpdir"
 }
 
+# 距上次成功写入 memory 的时间（秒）；由 do_archive 在写入后更新 .last_archive_ts
+minutes_since_last_archive() {
+    [ -f "$CONFIG_DIR/.last_archive_ts" ] || return 1
+    local last now
+    last=$(cat "$CONFIG_DIR/.last_archive_ts")
+    now=$(date +%s)
+    echo $(( (now - last) / 60 ))
+}
+
 should_run_archive() {
     FORCE_RUN="${FORCE_RUN:-0}"
-    [ "$FORCE_RUN" = "1" ] && return 0
+    RUN_ARCHIVE_TRIGGER=""
+    [ "$FORCE_RUN" = "1" ] && {
+        RUN_ARCHIVE_TRIGGER=force
+        return 0
+    }
     case "$TRIGGER_MODE" in
-        scheduled) return 0 ;;
+        scheduled)
+            RUN_ARCHIVE_TRIGGER=scheduled
+            return 0
+            ;;
         hybrid)
-            if [ "$USAGE_TOKENS" -ge "$MAX_INPUT_TOKENS" ] 2>/dev/null; then return 0; fi
+            if [ "$USAGE_TOKENS" -ge "$MAX_INPUT_TOKENS" ] 2>/dev/null; then
+                RUN_ARCHIVE_TRIGGER=hybrid_threshold
+                return 0
+            fi
+            if [ "${PERIODIC_ARCHIVE_MINUTES:-0}" -gt 0 ]; then
+                local pdiff
+                if pdiff=$(minutes_since_last_archive 2>/dev/null); then
+                    if [ "${pdiff:-999999999}" -ge "$PERIODIC_ARCHIVE_MINUTES" ]; then
+                        RUN_ARCHIVE_TRIGGER=hybrid_periodic
+                        log "[INFO] hybrid：定期归档间隔已满 ${pdiff}m ≥ ${PERIODIC_ARCHIVE_MINUTES}m（用量未达阈值），将检查新增消息"
+                        return 0
+                    fi
+                fi
+            fi
             if [ -f "$CONFIG_DIR/.last_archive_ts" ]; then
                 local last now diff
                 last=$(cat "$CONFIG_DIR/.last_archive_ts")
                 now=$(date +%s)
                 diff=$(( (now - last) / 60 ))
-                [ "$diff" -ge "$CHECK_INTERVAL_MINUTES" ] && return 0
+                if [ "$diff" -ge "$CHECK_INTERVAL_MINUTES" ]; then
+                    RUN_ARCHIVE_TRIGGER=hybrid_interval
+                    return 0
+                fi
             else
+                RUN_ARCHIVE_TRIGGER=hybrid_first
                 return 0
             fi
-            log "[INFO] hybrid：未达阈值且未到间隔，跳过"
+            log "[INFO] hybrid：未达阈值、未到 check_interval 且未到定期归档间隔，跳过"
             return 1
             ;;
         threshold|*)
-            if [ "$USAGE_TOKENS" -ge "$MAX_INPUT_TOKENS" ] 2>/dev/null; then return 0; fi
-            log "[INFO] threshold：用量 $USAGE_TOKENS < $MAX_INPUT_TOKENS，跳过（可用 --force）"
+            if [ "$USAGE_TOKENS" -ge "$MAX_INPUT_TOKENS" ] 2>/dev/null; then
+                RUN_ARCHIVE_TRIGGER=threshold
+                return 0
+            fi
+            if [ "${PERIODIC_ARCHIVE_MINUTES:-0}" -gt 0 ]; then
+                local pdiff
+                if pdiff=$(minutes_since_last_archive 2>/dev/null); then
+                    if [ "${pdiff:-999999999}" -ge "$PERIODIC_ARCHIVE_MINUTES" ]; then
+                        RUN_ARCHIVE_TRIGGER=periodic
+                        log "[INFO] threshold：定期归档间隔已满 ${pdiff}m ≥ ${PERIODIC_ARCHIVE_MINUTES}m（用量 $USAGE_TOKENS < $MAX_INPUT_TOKENS），将检查新增消息"
+                        return 0
+                    fi
+                fi
+            fi
+            if [ "${PERIODIC_ARCHIVE_MINUTES:-0}" -gt 0 ]; then
+                if [ ! -f "$CONFIG_DIR/.last_archive_ts" ]; then
+                    log "[INFO] threshold：用量 $USAGE_TOKENS < $MAX_INPUT_TOKENS；尚无 .last_archive_ts，定期补归档尚未开始计时（首次成功写入 memory 后每 ${PERIODIC_ARCHIVE_MINUTES}m 检查；可用 --force）"
+                else
+                    log "[INFO] threshold：用量 $USAGE_TOKENS < $MAX_INPUT_TOKENS，且距上次归档不足 ${PERIODIC_ARCHIVE_MINUTES}m，跳过（可用 --force）"
+                fi
+            else
+                log "[INFO] threshold：用量 $USAGE_TOKENS < $MAX_INPUT_TOKENS，跳过（可用 --force）；可设 archive.periodic_archive_minutes 做定时补归档）"
+            fi
             return 1
             ;;
     esac
@@ -324,6 +384,8 @@ should_run_archive() {
 cooldown_blocks_write() {
     FORCE_RUN="${FORCE_RUN:-0}"
     [ "$FORCE_RUN" = "1" ] && return 1
+    # 定期补归档：不因「用量与上次相同」而跳过写入，避免少量重要对话被挡在冷却外
+    case "${RUN_ARCHIVE_TRIGGER:-}" in periodic) return 1 ;; esac
     [ "$TRIGGER_MODE" = "threshold" ] || return 1
     [ "${COOLDOWN_MINUTES:-0}" -gt 0 ] 2>/dev/null || return 1
     [ -f "$CONFIG_DIR/.last_archive_meta.json" ] || return 1
@@ -483,8 +545,13 @@ do_archive() {
         exit 0
     fi
 
-    if [ "${FORCE_RUN:-0}" != "1" ] && [ "${msg_count:-0}" -lt "$MIN_NEW_MESSAGES" ]; then
-        log "[INFO] 新增消息 ${msg_count} < min_new_messages=${MIN_NEW_MESSAGES}，累积后再归档（不写 memory、不推进检查点）"
+    local bypass_min_new=0
+    [ "${FORCE_RUN:-0}" = "1" ] && bypass_min_new=1
+    [ "$USAGE_TOKENS" -ge "$MAX_INPUT_TOKENS" ] 2>/dev/null && bypass_min_new=1
+    case "${RUN_ARCHIVE_TRIGGER:-}" in periodic | hybrid_periodic) bypass_min_new=1 ;; esac
+
+    if [ "$bypass_min_new" != "1" ] && [ "${msg_count:-0}" -lt "$MIN_NEW_MESSAGES" ]; then
+        log "[INFO] 新增消息 ${msg_count} < min_new_messages=${MIN_NEW_MESSAGES}，累积后再归档（不写 memory、不推进检查点）；超阈值 / 定期间隔触发时可放宽"
         run_compact
         exit 0
     fi
@@ -505,12 +572,17 @@ do_archive() {
     done
 
     local insights cloud_block trigger_reason
-    if [ "${FORCE_RUN:-0}" = "1" ]; then trigger_reason="手动强制归档"
-    elif [ "$TRIGGER_MODE" = "scheduled" ]; then trigger_reason="定时 / scheduled"
-    elif [ "$TRIGGER_MODE" = "hybrid" ]; then
-        [ "$USAGE_TOKENS" -ge "$MAX_INPUT_TOKENS" ] 2>/dev/null && trigger_reason="hybrid 阈值" || trigger_reason="hybrid 间隔"
-    else trigger_reason="达到阈值"
-    fi
+    case "${RUN_ARCHIVE_TRIGGER:-}" in
+        force) trigger_reason="手动强制归档" ;;
+        scheduled) trigger_reason="定时 / scheduled" ;;
+        hybrid_threshold) trigger_reason="hybrid 阈值" ;;
+        hybrid_periodic) trigger_reason="hybrid：定期归档间隔（用量未达阈值）" ;;
+        hybrid_interval) trigger_reason="hybrid 间隔（check_interval_minutes）" ;;
+        hybrid_first) trigger_reason="hybrid 首次（无 .last_archive_ts）" ;;
+        periodic) trigger_reason="定期归档间隔（用量未达阈值，有新增则写 memory）" ;;
+        threshold) trigger_reason="达到阈值" ;;
+        *) trigger_reason="归档（trigger=${RUN_ARCHIVE_TRIGGER:-?}）" ;;
+    esac
 
     insights=""
     cloud_block=""

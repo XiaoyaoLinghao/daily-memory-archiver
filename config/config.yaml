@@ -20,6 +20,8 @@ archive:
     cooldown_minutes: 45
   # 新增消息少于该条数时不写 memory（不推进检查点），避免零星对话重复摘要；--force 仍立即归档
   min_new_messages: 1
+  # 距上次成功写入 memory ≥ 该分钟数时，即使未达 200k 也跑归档（有新增则写）；compact 仍仅超限 key（见 compact_only_over_threshold）
+  periodic_archive_minutes: 120
   # true：仅对用量 ≥ max_input_tokens 的 session key 调用 sessions.compact
   compact_only_over_threshold: true
   compact:
@@ -42,5 +44,5 @@ logging:
 output:
   memory_dir: "/home/zhy765664161/.openclaw/workspace/memory"
 
-skill_version: "1.4.0"
-config_version: "6"
+skill_version: "1.4.1"
+config_version: "7"
