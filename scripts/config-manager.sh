@@ -10,6 +10,8 @@ CREDENTIALS_FILE="${CONFIG_DIR}/credentials.enc"
 export CONFIG_DIR
 # shellcheck source=lib/credentials-store.sh
 source "$SCRIPT_DIR/lib/credentials-store.sh"
+# shellcheck source=lib/config-loader.sh
+source "$SCRIPT_DIR/lib/config-loader.sh"
 
 mkdir -p "$CONFIG_DIR"
 chmod 700 "$CONFIG_DIR"
@@ -18,13 +20,7 @@ log() {
     echo "[$(date '+%H:%M:%S')] $1"
 }
 
-legacy_yaml_cloud_value() {
-    local key="$1"
-    [ -f "$CONFIG_FILE" ] || return 1
-    grep -E "^[[:space:]]+${key}:" "$CONFIG_FILE" | head -1 | \
-        sed -E "s/^[[:space:]]*${key}:[[:space:]]*//" | \
-        sed -E 's/^"//;s/"$//;s/^'\''//;s/'\''$//;s/[[:space:]]*$//;s/#.*$//'
-}
+legacy_yaml_cloud_value() { yaml_scalar "$1"; }
 
 migrate_legacy_plaintext_yaml() {
     [ -f "$CREDENTIALS_FILE" ] && return 0
@@ -55,22 +51,7 @@ read_preserved_session_key() {
     ' "$CONFIG_FILE"
 }
 
-read_preserved_merge_jsonl_keys() {
-    [ -f "$CONFIG_FILE" ] || return
-    awk '
-        /^session:/ { ins=1; next }
-        ins && /^[a-z][a-z0-9_]*:/ && !/^session/ { ins=0 }
-        ins && /^[[:space:]]+merge_jsonl_keys:/ { inlist=1; next }
-        inlist && /^[[:space:]]+-[[:space:]]/ {
-            line=$0
-            sub(/^[[:space:]]+-[[:space:]]+/, "", line)
-            gsub(/^["'\'']|["'\'']$/, "", line)
-            if (line != "") print line
-            next
-        }
-        inlist && /^[[:space:]]+[a-zA-Z_][a-zA-Z0-9_.-]*:/ && !/^([[:space:]]+-)/ { inlist=0 }
-    ' "$CONFIG_FILE"
-}
+read_preserved_merge_jsonl_keys() { yaml_merge_keys "$CONFIG_FILE"; }
 
 save_config_yaml() {
     local sk preserved_m m
@@ -130,8 +111,8 @@ save_config_yaml() {
         echo "output:"
         echo "  memory_dir: \"${MEMORY_DIR:-$HOME/.openclaw/workspace/memory}\""
         echo ""
-        echo "skill_version: \"1.4.1\""
-        echo "config_version: \"7\""
+        echo "skill_version: \"1.5.0\""
+        echo "config_version: \"8\""
     } > "$CONFIG_FILE"
     chmod 644 "$CONFIG_FILE"
     log "✅ 配置已保存: $CONFIG_FILE"

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Daily Memory Archiver — 日志按大小轮转 + 按天龄删除旧轮转文件
 # 由 archive-engine.sh source；也可单独测试：source 后调用下列函数。
+set -euo pipefail
 
 # 按天龄删除：仅删除「轮转备份」$(basename).1、.2…，不删当前活动日志。
 # 返回 stdout：删除的文件个数（单行数字）。

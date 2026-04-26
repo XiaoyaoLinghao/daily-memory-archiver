@@ -14,6 +14,10 @@ command -v curl >/dev/null || fail curl
 [ -x "$ROOT/scripts/config-manager.sh" ] || fail "config-manager.sh not executable"
 [ -f "$ROOT/scripts/lib/credentials-store.sh" ] || fail credentials-store
 [ -f "$ROOT/scripts/lib/log-maintenance.sh" ] || fail log-maintenance.sh
+[ -f "$ROOT/scripts/lib/config-loader.sh" ] || fail config-loader.sh
+[ -x "$ROOT/scripts/skill-interactive.sh" ] || fail skill-interactive.sh
+[ -x "$ROOT/scripts/extractors/local-extractor.sh" ] || fail local-extractor.sh
+[ -x "$ROOT/scripts/summarizers/cloud-summarizer.sh" ] || fail cloud-summarizer.sh
 [ -f "$ROOT/SKILL.md" ] || fail SKILL.md
 [ -f "$ROOT/README.md" ] || fail README.md
 

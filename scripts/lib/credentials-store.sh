@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 加密凭证：credentials.enc（AES-256-CBC + PBKDF2），密钥 config/.master_key
 set -euo pipefail
+set -euo pipefail
 
 CRED_DIR="${CONFIG_DIR:?CONFIG_DIR must be set}"
 MASTER_KEY_FILE="$CRED_DIR/.master_key"

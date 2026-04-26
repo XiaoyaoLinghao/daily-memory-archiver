@@ -2,11 +2,13 @@
 
 OpenClaw 会话归档 Skill：多 session 按时间合并、检查点增量、本地关键词提取、可选云端 LLM 摘要、按 key 用量触发与选择性 `sessions.compact`。
 
-**面向维护者**：本文描述仓库布局、配置键、入口脚本与扩展点。面向 Cursor / 助手的交互说明见根目录 **[SKILL.md](./SKILL.md)**（安装、配对、cron 等）。
+**面向维护者**：本文描述仓库布局、配置键、入口脚本与扩展点。面向 Cursor / 助手的交互说明见根目录 **[SKILL.md](./SKILL.md)**（安装、配对、cron、**全局 skills vs workspace/skills**、迁移清单等）。
+
+**安装位置**：自维护 / Git 管理推荐 **`$HOME/.openclaw/workspace/skills/daily-memory-archiver`**；全局目录 **`$HOME/.openclaw/skills/daily-memory-archiver`** 亦支持。脚本以自身路径解析 `SKILL_ROOT`，与安装在哪一侧无关。
 
 ## 版本与兼容
 
-- **当前：1.4.1**（`config_version: "7"`）：定期间隔补归档 `periodic_archive_minutes`、cron 单日志策略、`log()` 非 TTY 不镜像 stderr 等。
+- **当前：1.5.0**（`config_version: "8"`）：上下文感知噪声过滤、动态噪声规则管理、OpenClaw 对话式配置。
 - 实现与 **SKILL.md** 中 `skill_version` / `config.yaml` 中 `config_version` 应对齐；以脚本行为为准。
 - Shell：**bash 4+**（使用关联数组 `declare -A`）。
 

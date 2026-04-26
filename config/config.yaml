@@ -44,5 +44,16 @@ logging:
 output:
   memory_dir: "/home/zhy765664161/.openclaw/workspace/memory"
 
-skill_version: "1.4.1"
-config_version: "7"
+# 噪声过滤规则：用于过滤对话中的系统消息、heartbeat 等无意义内容
+# 可通过 OpenClaw 对话动态添加：/call skill daily-memory-archiver add-noise-pattern "[cron]"
+noise_filter:
+  custom_patterns:
+  custom_patterns: []
+  # 可通过 OpenClaw 对话动态添加：/call skill daily-memory-archiver add-noise-pattern "[cron]"
+  # custom_patterns:
+  #   - "[cron]"
+  #   - "heartbeat check"
+  #   - "system prompt"
+
+skill_version: "1.5.0"
+config_version: "8"

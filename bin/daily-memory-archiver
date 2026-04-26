@@ -19,6 +19,11 @@ case "${1:-help}" in
     check|self-check) exec bash "$ROOT/scripts/self-check.sh" ;;
     status) exec bash "$ROOT/scripts/config-manager.sh" status ;;
     creds) exec bash "$ROOT/scripts/config-manager.sh" show ;;
+    # OpenClaw Skill 交互模式：JSON 输出供 LLM 解析
+    interactive|skill)
+        shift
+        exec bash "$ROOT/scripts/skill-interactive.sh" "$@"
+        ;;
     help|-h|--help) usage; exit 0 ;;
     *) usage; exit 2 ;;
 esac

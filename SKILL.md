@@ -1,18 +1,18 @@
 ---
 name: daily-memory-archiver
 description: |
-  Daily Memory Archiver v1.4.1 — OpenClaw 会话归档：按 session key 统计用量、检查点后仅合并新增消息、可选分块云端摘要、默认仅对超限 key 执行 sessions.compact。根目录 ~/.openclaw/skills/daily-memory-archiver。
+  Daily Memory Archiver v1.5.0 — OpenClaw 会话归档：按 session key 统计用量、检查点后仅合并新增消息、可选分块云端摘要、默认仅对超限 key 执行 sessions.compact。推荐根目录 ~/.openclaw/workspace/skills/daily-memory-archiver（自维护）；亦支持 ~/.openclaw/skills/daily-memory-archiver（全局）。
 
   **必须读取本 Skill 时**：安装/配置 API、定时归档、credentials.enc、merge_jsonl_keys、检查点、pairing、多通道、get-cloud-creds、archive-engine。
 
-  **Skill 根目录**：`~/.openclaw/skills/daily-memory-archiver`
+  **Skill 根目录（推荐）**：`~/.openclaw/workspace/skills/daily-memory-archiver` — 与 `agents.defaults.workspace` 同级工作区 skills，便于 Git / 备份 / 迁移。
 
   **维护文档**：同目录 `README.md`（工程布局、日志策略、改代码清单）。
 ---
 
 # Daily Memory Archiver
 
-**文档与实现版本：1.4.1**（`config.yaml` 中 `skill_version` 可与本文不一致时，以本文与脚本为准。）
+**文档与实现版本：1.5.0**（`config.yaml` 中 `skill_version` 可与本文不一致时，以本文与脚本为准。）
 
 ## 0. 核心思路
 
@@ -21,18 +21,30 @@ description: |
 3. **单次入口**：`scripts/archive-engine.sh archive` 或 `bin/daily-memory-archiver archive`。整体流程：**读 `sessions.json` → 按 key 统计用量 → 判断是否应运行 → 自检查点起仅合并各 key 的新消息（跨 key 按 `timestamp` 排序）→ 本地提取 + 可选云端摘要（可分段）→ 写 `memory/YYYY-MM-DD.md` → 仅对用量达阈值的 key 调用 `sessions.compact`（可配置）**。
 4. **与轻量 memory 钩子可并存**。
 
+### 0.1 安装根目录：`~/.openclaw/skills/` 与 `~/.openclaw/workspace/skills/`
+
+| 位置 | 典型用途 |
+|:---|:---|
+| **`$HOME/.openclaw/skills/`** | OpenClaw **全局** skills，核心或官方分发常见于此。 |
+| **`$HOME/.openclaw/workspace/skills/`** | **工作区** skills（与 `openclaw.json` → `agents.defaults.workspace` 对应目录下的 `skills/`），适合**自编写、Git 管理、随仓库迁移**的本 skill。 |
+
+**本文命令与 crontab 示例**以 **`$HOME/.openclaw/workspace/skills/daily-memory-archiver`** 为准。若你仍安装在全局目录，把路径前缀改为 **`$HOME/.openclaw/skills/daily-memory-archiver`** 即可。  
+`archive-engine.sh` / `config-manager.sh` 通过**脚本所在目录**解析 `SKILL_ROOT` 与默认 `config/`，**不依赖**安装在上表哪一侧；也可用环境变量 **`DAILY_MEMORY_CONFIG_DIR`** 指向另一份 `config/`（高级用法）。
+
+**从全局迁到工作区**：见本文 **§9**。
+
 ## 1. 依赖
 
 `bash`（建议 4.x，使用关联数组）、`jq`、`openssl`、`curl`；推荐 `flock`、`openclaw`（compact）。
 
 ```bash
-bash ~/.openclaw/skills/daily-memory-archiver/scripts/self-check.sh
+bash "$HOME/.openclaw/workspace/skills/daily-memory-archiver/scripts/self-check.sh"
 ```
 
 ## 2. 安装与 API
 
 ```bash
-~/.openclaw/skills/daily-memory-archiver/bin/daily-memory-archiver init --defaults
+"$HOME/.openclaw/workspace/skills/daily-memory-archiver/bin/daily-memory-archiver" init --defaults
 ```
 
 写入凭证（JSON）：
@@ -40,7 +52,7 @@ bash ~/.openclaw/skills/daily-memory-archiver/scripts/self-check.sh
 ```bash
 jq -n --arg u "BASE_URL" --arg t "TOKEN" --arg m "MODEL" \
   '{api_url:$u, api_token:$t, model:$m}' | \
-  bash ~/.openclaw/skills/daily-memory-archiver/scripts/config-manager.sh save-json
+  bash "$HOME/.openclaw/workspace/skills/daily-memory-archiver/scripts/config-manager.sh" save-json
 ```
 
 **`save-json` 会保留**已有 **`session.key`** 与 **`merge_jsonl_keys`**，不会清空多通道列表。
@@ -50,14 +62,14 @@ jq -n --arg u "BASE_URL" --arg t "TOKEN" --arg m "MODEL" \
 ## 3. 归档命令
 
 ```bash
-bash ~/.openclaw/skills/daily-memory-archiver/scripts/archive-engine.sh archive
-bash ~/.openclaw/skills/daily-memory-archiver/scripts/archive-engine.sh archive --force
+bash "$HOME/.openclaw/workspace/skills/daily-memory-archiver/scripts/archive-engine.sh" archive
+bash "$HOME/.openclaw/workspace/skills/daily-memory-archiver/scripts/archive-engine.sh" archive --force
 # 可选：只处理单个 session（覆盖 merge 列表）
-bash ~/.openclaw/skills/daily-memory-archiver/scripts/archive-engine.sh archive --session 'agent:main:main'
-bash ~/.openclaw/skills/daily-memory-archiver/scripts/archive-engine.sh archive --agent main
+bash "$HOME/.openclaw/workspace/skills/daily-memory-archiver/scripts/archive-engine.sh" archive --session 'agent:main:main'
+bash "$HOME/.openclaw/workspace/skills/daily-memory-archiver/scripts/archive-engine.sh" archive --agent main
 # 仅清理/轮转日志（读 config.yaml 中 logging.*）
-bash ~/.openclaw/skills/daily-memory-archiver/scripts/archive-engine.sh log-maintenance
-~/.openclaw/skills/daily-memory-archiver/bin/daily-memory-archiver logs
+bash "$HOME/.openclaw/workspace/skills/daily-memory-archiver/scripts/archive-engine.sh" log-maintenance
+"$HOME/.openclaw/workspace/skills/daily-memory-archiver/bin/daily-memory-archiver" logs
 ```
 
 | 参数 | 含义 |
@@ -72,7 +84,7 @@ bash ~/.openclaw/skills/daily-memory-archiver/scripts/archive-engine.sh log-main
 **cron 与日志（推荐）**：**不要**再单独 `>> daily-memory-archiver-cron.log`；引擎已写入 **`$OPENCLAW_HOME/logs/daily-memory-archiver.log`**（轮转见 `logging.*`）。crontab 行尾使用 **`>/dev/null 2>&1`** 即可，避免与 stderr 叠成双份、也避免 cron 发空邮件。`log()` 仅在 **stderr 为终端**时镜像一行，便于本地手跑调试。
 
 ```cron
-*/30 * * * * /完整路径/.openclaw/skills/daily-memory-archiver/bin/daily-memory-archiver archive >/dev/null 2>&1
+*/30 * * * * /完整路径/.openclaw/workspace/skills/daily-memory-archiver/bin/daily-memory-archiver archive >/dev/null 2>&1
 ```
 
 （若 cron 环境未设 `HOME`，请在行首 `HOME=/你的家目录` 或写死路径。）
@@ -183,8 +195,8 @@ logging:
 output:
   memory_dir: "~/.openclaw/workspace/memory"
 
-skill_version: "1.4.1"
-config_version: "7"
+skill_version: "1.5.0"
+config_version: "8"
 ```
 
 ### 4.9 日志轮转与清理
@@ -197,8 +209,8 @@ config_version: "7"
 仅做日志维护、不跑归档：
 
 ```bash
-bash ~/.openclaw/skills/daily-memory-archiver/scripts/archive-engine.sh log-maintenance
-~/.openclaw/skills/daily-memory-archiver/bin/daily-memory-archiver logs
+bash "$HOME/.openclaw/workspace/skills/daily-memory-archiver/scripts/archive-engine.sh" log-maintenance
+"$HOME/.openclaw/workspace/skills/daily-memory-archiver/bin/daily-memory-archiver" logs
 ```
 
 工程结构、实现文件与维护清单见仓库根目录 **[README.md](./README.md)**。
@@ -254,7 +266,30 @@ Gateway 在 transcript **行数 ≤ max_lines（默认 400）** 时返回 **`com
 | `bin/daily-memory-archiver` | `archive`、`logs` 等快捷入口 |
 | `README.md` | 维护者：目录、配置、扩展清单 |
 
-## 9. 重载 Skill
+## 9. 从全局 `skills` 迁到工作区 `workspace/skills`（迁移清单）
+
+适用于当前 skill 在 **`$HOME/.openclaw/skills/daily-memory-archiver`**、希望改到 **`$HOME/.openclaw/workspace/skills/daily-memory-archiver`** 的情况（与 §0.1 一致）。
+
+1. **暂停 cron**：注释 crontab 里调用 `daily-memory-archiver` 的行，避免搬迁过程中双实例或路径错误。
+2. **建目录**：`mkdir -p "$HOME/.openclaw/workspace/skills"`
+3. **搬迁（二选一）**  
+   - **整目录 `mv`（推荐，保留 Git 与 config）**：  
+     `mv "$HOME/.openclaw/skills/daily-memory-archiver" "$HOME/.openclaw/workspace/skills/"`  
+     若目标已存在同名目录，先 `mv` 走或改名备份，勿盲目覆盖。  
+   - **新 clone + 拷 config**：在新路径 `git clone …` 后，将旧目录下 **`config/`**（含 `config.yaml`、`credentials.enc`、`.master_key`、`.archive_merge_checkpoint.json`、`.last_archive_ts` 等运行时文件）拷入新仓库的 `config/`，权限保持 **`chmod 700 config`**。
+4. **改 crontab**：把可执行文件路径改为  
+   `"$HOME/.openclaw/workspace/skills/daily-memory-archiver/bin/daily-memory-archiver"`（或写绝对路径）。
+5. **OpenClaw / Cursor**：确认助手或 Control UI 从**新路径**加载 `SKILL.md`（视你使用的 OpenClaw 版本对工作区 `skills/` 的扫描规则而定）。
+6. **验证**：  
+   `bash "$HOME/.openclaw/workspace/skills/daily-memory-archiver/scripts/self-check.sh"`  
+   再按需执行 `archive`（生产环境慎用 `--force`）。
+7. **清理**：确认无其他脚本引用旧路径后，删除 **`$HOME/.openclaw/skills/daily-memory-archiver`** 下残留（若已 `mv` 则旧路径应已不存在）。
+
+**过渡期**：若仍有工具写死旧路径，可短期  
+`ln -s "$HOME/.openclaw/workspace/skills/daily-memory-archiver" "$HOME/.openclaw/skills/daily-memory-archiver"`  
+长期仍应改为新路径或环境变量。
+
+## 10. 重载 Skill
 
 修改 `SKILL.md` 后请 **新开会话** 或 `openclaw skills check`，并用 **read** 重新加载本文。
 
