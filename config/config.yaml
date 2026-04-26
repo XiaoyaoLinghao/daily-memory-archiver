@@ -42,7 +42,7 @@ logging:
   log_max_age_days: 30
 
 output:
-  memory_dir: "/home/zhy765664161/.openclaw/workspace/memory"
+  memory_dir: "~/.openclaw/workspace/memory"
 
 # 噪声过滤规则：用于过滤对话中的系统消息、heartbeat 等无意义内容
 # 可通过 OpenClaw 对话动态添加：/call skill daily-memory-archiver add-noise-pattern "[cron]"

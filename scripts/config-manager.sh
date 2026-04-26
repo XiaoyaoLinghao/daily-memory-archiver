@@ -109,7 +109,7 @@ save_config_yaml() {
         echo "  log_max_age_days: ${LOG_MAX_AGE_DAYS:-30}"
         echo ""
         echo "output:"
-        echo "  memory_dir: \"${MEMORY_DIR:-$HOME/.openclaw/workspace/memory}\""
+        echo "  memory_dir: \"${MEMORY_DIR:-~/.openclaw/workspace/memory}\""
         echo ""
         echo "skill_version: \"1.5.0\""
         echo "config_version: \"8\""

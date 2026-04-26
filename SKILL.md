@@ -59,6 +59,16 @@ jq -n --arg u "BASE_URL" --arg t "TOKEN" --arg m "MODEL" \
 
 状态：`config-manager.sh status` / `show`（脱敏）。
 
+### 2.1 配置 `output.memory_dir`
+
+`config.yaml` 中 `output.memory_dir` 控制 memory 文件（`YYYY-MM-DD.md`）的写入目录。
+
+- **默认值**：`~/.openclaw/workspace/memory`（`~` 会在运行时展开为当前用户的 `$HOME`，不会泄露具体路径）。
+- **自定义**：OpenClaw 对话配置时应询问用户的实际 memory 目录，若用户无特殊要求则保留默认值。可通过以下方式覆盖：
+  - 直接编辑 `config.yaml`：`memory_dir: "/你的自定义路径"`
+  - 环境变量：`DAILY_MEMORY_MEMORY_DIR=/你的自定义路径`
+- **注意**：请勿在 `config.yaml` 中填入其他用户的绝对路径（如 `/home/某用户/…`），该文件可能被分享或提交。始终使用 `~` 或环境变量。
+
 ## 3. 归档命令
 
 ```bash

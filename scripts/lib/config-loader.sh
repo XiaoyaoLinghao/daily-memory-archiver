@@ -109,21 +109,29 @@ EOF
     echo "CHECK_INTERVAL_MINUTES=$(canonical_uint "$(yaml_scalar check_interval_minutes "$file")" 5)"
     echo "PERIODIC_ARCHIVE_MINUTES=$(canonical_uint "$(yaml_scalar periodic_archive_minutes "$file")" 0)"
     echo "COOLDOWN_MINUTES=$(canonical_uint "$(yaml_scalar cooldown_minutes "$file")" 45)"
-    echo "MIN_NEW_MESSAGES=$(canonical_uint "$(yaml_scalar min_new_messages "$file")" 1)"
-    [ "$MIN_NEW_MESSAGES" -lt 1 ] 2>/dev/null && echo "MIN_NEW_MESSAGES=1"
-    echo "COMPACT_MAX_LINES=$(canonical_uint "$(yaml_scalar max_lines "$file")" 400)"
-    [ "$COMPACT_MAX_LINES" -lt 1 ] 2>/dev/null && echo "COMPACT_MAX_LINES=400"
+    local _min_new_msgs
+    _min_new_msgs=$(canonical_uint "$(yaml_scalar min_new_messages "$file")" 1)
+    [ "$_min_new_msgs" -lt 1 ] 2>/dev/null && _min_new_msgs=1
+    echo "MIN_NEW_MESSAGES=$_min_new_msgs"
+    local _compact_max_lines
+    _compact_max_lines=$(canonical_uint "$(yaml_scalar max_lines "$file")" 400)
+    [ "$_compact_max_lines" -lt 1 ] 2>/dev/null && _compact_max_lines=400
+    echo "COMPACT_MAX_LINES=$_compact_max_lines"
     echo "COMPACT_ONLY_OVER_THRESHOLD=$(yaml_bool compact_only_over_threshold 1 "$file")"
 
     cat <<'EOF'
 
 # ===== analyzer =====
 EOF
-    echo "MESSAGES_TO_ANALYZE=$(canonical_uint "$(yaml_scalar messages_to_analyze "$file")" 50)"
-    [ "$MESSAGES_TO_ANALYZE" -lt 1 ] 2>/dev/null && echo "MESSAGES_TO_ANALYZE=50"
+    local _msgs_to_analyze
+    _msgs_to_analyze=$(canonical_uint "$(yaml_scalar messages_to_analyze "$file")" 50)
+    [ "$_msgs_to_analyze" -lt 1 ] 2>/dev/null && _msgs_to_analyze=50
+    echo "MESSAGES_TO_ANALYZE=$_msgs_to_analyze"
     echo "CHUNK_CLOUD_SUMMARY=$(yaml_bool chunk_cloud_summary 1 "$file")"
-    echo "MAX_CLOUD_SUMMARY_CHUNKS=$(canonical_uint "$(yaml_scalar max_cloud_summary_chunks "$file")" 20)"
-    [ "$MAX_CLOUD_SUMMARY_CHUNKS" -lt 1 ] 2>/dev/null && echo "MAX_CLOUD_SUMMARY_CHUNKS=20"
+    local _max_chunks
+    _max_chunks=$(canonical_uint "$(yaml_scalar max_cloud_summary_chunks "$file")" 20)
+    [ "$_max_chunks" -lt 1 ] 2>/dev/null && _max_chunks=20
+    echo "MAX_CLOUD_SUMMARY_CHUNKS=$_max_chunks"
     echo "CLOUD_SUMMARIZER_ENABLED=$(yaml_bool 'cloud_summarizer.enabled' 1 "$file")"
 
     cat <<'EOF'
@@ -131,8 +139,10 @@ EOF
 # ===== logging =====
 EOF
     echo "LOG_MAX_BYTES=$(canonical_uint "$(yaml_scalar log_max_bytes "$file")" 0)"
-    echo "LOG_KEEP_ROTATIONS=$(canonical_uint "$(yaml_scalar log_keep_rotations "$file")" 5)"
-    [ "$LOG_KEEP_ROTATIONS" -lt 1 ] 2>/dev/null && echo "LOG_KEEP_ROTATIONS=5"
+    local _log_keep_rot
+    _log_keep_rot=$(canonical_uint "$(yaml_scalar log_keep_rotations "$file")" 5)
+    [ "$_log_keep_rot" -lt 1 ] 2>/dev/null && _log_keep_rot=5
+    echo "LOG_KEEP_ROTATIONS=$_log_keep_rot"
     echo "LOG_MAX_AGE_DAYS=$(canonical_uint "$(yaml_scalar log_max_age_days "$file")" 0)"
 
     cat <<'EOF'
