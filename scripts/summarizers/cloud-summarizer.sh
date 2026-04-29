@@ -8,8 +8,10 @@ kind="$1" model="$2" base="$3" key="$4"
 
 # 去掉 NUL，限制长度，避免 shell/jq 处理异常
 body_tmp=$(mktemp)
-chmod 600 "$body_tmp"
-trap 'rm -f "$body_tmp"' EXIT  # 确保任何退出情况下都清理临时文件
+payload_tmp=$(mktemp)
+resp_tmp=$(mktemp)
+chmod 600 "$body_tmp" "$payload_tmp" "$resp_tmp"
+trap 'rm -f "$body_tmp" "$payload_tmp" "$resp_tmp"' EXIT  # 确保任何退出情况下都清理临时文件
 tr -d '\000' <"$file" | head -c 120000 >"$body_tmp"
 
 # ============================================================================
@@ -61,35 +63,37 @@ case "$base" in
 esac
 
 # --rawfile 避免对话中的引号/反斜杠破坏 jq（需 jq ≥1.5）
-if ! payload=$(jq -n \
+if ! jq -n \
     --arg m "$model" \
     --arg s "$sys" \
     --rawfile b "$body_tmp" \
-    '{model:$m, temperature: 0.3, messages:[{role:"system",content:$s},{role:"user",content:("请归纳以下对话内容，严格按照 8 个分类的 Markdown 格式输出：\n\n" + $b)}]}' 2>/dev/null); then
+    '{model:$m, temperature: 0.3, messages:[{role:"system",content:$s},{role:"user",content:("请归纳以下对话内容，严格按照 8 个分类的 Markdown 格式输出：\n\n" + $b)}]}' \
+    >"$payload_tmp" 2>/dev/null; then
     echo "- *（构建请求 JSON 失败；检查 jq 版本与输入内容）*" >&2
     exit 1
 fi
 
-resp=$(curl -sS --max-time 120 -X POST "$url" \
+if ! curl -sS --max-time 120 -X POST "$url" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $key" \
-    -d "$payload") || {
+    -d @"$payload_tmp" \
+    -o "$resp_tmp"; then
     echo "- *（curl 请求失败）*" >&2
     exit 1
-}
+fi
 
-if ! echo "$resp" | jq empty 2>/dev/null; then
+if ! jq empty "$resp_tmp" 2>/dev/null; then
     echo "- *（API 返回非 JSON；可能被网关/HTML 拦截，见日志前 500 字）*" >&2
-    echo "$resp" | head -c 500 >>"${DAILY_MEMORY_LOG:-/dev/null}" 2>/dev/null || true
+    head -c 500 "$resp_tmp" >>"${DAILY_MEMORY_LOG:-/dev/null}" 2>/dev/null || true
     exit 1
 fi
 
-if echo "$resp" | jq -e '.error' >/dev/null 2>&1; then
-    echo "- *（API 错误: $(echo "$resp" | jq -r '.error.message // .error | tostring')）*" >&2
+if jq -e '.error' "$resp_tmp" >/dev/null 2>&1; then
+    echo "- *（API 错误: $(jq -r '.error.message // .error | tostring' "$resp_tmp")）*" >&2
     exit 1
 fi
 
-out=$(echo "$resp" | jq -r '.choices[0].message.content // empty')
+out=$(jq -r '.choices[0].message.content // empty' "$resp_tmp")
 if [ -z "$out" ]; then
     echo "- *（摘要响应为空）*"
     exit 1
