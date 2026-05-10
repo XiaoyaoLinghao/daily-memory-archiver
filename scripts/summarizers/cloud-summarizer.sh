@@ -11,7 +11,7 @@ body_tmp=$(mktemp)
 payload_tmp=$(mktemp)
 resp_tmp=$(mktemp)
 chmod 600 "$body_tmp" "$payload_tmp" "$resp_tmp"
-trap 'rm -f "$body_tmp" "$payload_tmp" "$resp_tmp"' EXIT  # 确保任何退出情况下都清理临时文件
+trap 'rm -f "$body_tmp" "$payload_tmp" "$resp_tmp"' EXIT
 tr -d '\000' <"$file" | head -c 120000 >"$body_tmp"
 
 # ============================================================================
@@ -20,33 +20,33 @@ tr -d '\000' <"$file" | head -c 120000 >"$body_tmp"
 # ============================================================================
 sys='你是 Daily Memory Archiver 的对话归纳助手。请用中文输出以下严格结构化的内容，供 OpenClaw Dream 模式读取和长期记忆整合：
 
-## 📌 核心要点（Core Insights）
+**核心要点**
 - 每条用 "- " 开头，内容必须简洁、明确，可作为长期记忆存储
 - 按重要性排序，最重要的放在前面
 
-## 🎯 决策与结论（Decisions）
+**决策与结论**
 - 明确做出的决定、结论、选择
 - 包含决策背景和原因
 
-## ✅ 已完成事项（Completed）
+**已完成事项**
 - 已完成的任务、实现的功能、解决的问题
 
-## 📋 待办与计划（Action Items）
+**待办与计划**
 - 后续需要执行的具体事项
 - 如有时间节点请注明
 
-## 🧠 用户偏好与习惯（Preferences）
+**用户偏好与习惯**
 - 明确的用户偏好、工作习惯、沟通方式
 - 这是 Dream 模式重点提取的长期记忆
 
-## 🔧 技术/项目要点（Project Notes）
+**技术/项目要点**
 - 项目进展、技术方案、架构设计
 - 代码规范、工具选择
 
-## ⚠️ 风险与注意事项（Risks）
+**风险与注意事项**
 - 需要留意的问题、潜在风险、注意事项
 
-## 💡 创意与想法（Ideas）
+**创意与想法**
 - 讨论中产生的新想法、灵感、可能性
 
 重要说明：
@@ -63,6 +63,7 @@ case "$base" in
 esac
 
 # --rawfile 避免对话中的引号/反斜杠破坏 jq（需 jq ≥1.5）
+# payload 写临时文件，避免 -d "$payload" 超过 ARG_MAX 导致 curl 失败
 if ! jq -n \
     --arg m "$model" \
     --arg s "$sys" \
@@ -73,6 +74,7 @@ if ! jq -n \
     exit 1
 fi
 
+# response 写临时文件（-o），避免 resp=$(curl) 管道写入失败触发 curl: (23)
 if ! curl -sS --max-time 120 -X POST "$url" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $key" \

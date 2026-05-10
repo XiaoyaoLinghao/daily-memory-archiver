@@ -54,6 +54,11 @@ bash scripts/get-cloud-creds.sh                       # Output decrypted JSON
 bash scripts/get-cloud-creds.sh --export              # Export to env vars
 ```
 
+### Interactive Configuration
+```bash
+bash scripts/skill-interactive.sh                     # Conversation-based setup wizard
+```
+
 ## Code Architecture
 
 ### Core Execution Flow (`archive-engine.sh archive`)
@@ -66,6 +71,11 @@ bash scripts/get-cloud-creds.sh --export              # Export to env vars
 7. **Analysis & Output**: Local extraction, cloud summarization (chunkable), append to `memory/YYYY-MM-DD.md`
 8. **Compact**: `sessions.compact` (only for threshold-exceeding keys by default)
 
+**Trigger Modes** (`archive.trigger_mode`):
+- `threshold`: Archive only when session usage exceeds thresholds
+- `hybrid`: Threshold-based + periodic fallback via `periodic_archive_minutes`
+- `scheduled`: Ignore thresholds, archive strictly on schedule
+
 ### Key Modules
 
 | Module | Responsibility |
@@ -74,11 +84,15 @@ bash scripts/get-cloud-creds.sh --export              # Export to env vars
 | `config-manager.sh` | Config initialization, credentials encryption, merge key management |
 | `lib/credentials-store.sh` | OpenSSL encryption/decryption layer |
 | `lib/log-maintenance.sh` | Log rotation (by age + size) |
-| `lib/conversation-noise.sh` | Noise filtering for local extraction |
+| `lib/conversation-noise.sh` | Context-aware noise filtering (removes system prompts, tool calls, etc.) for cleaner local extraction |
 | `extractors/local-extractor.sh` | Message JSON → Markdown keyword blocks |
 | `summarizers/cloud-summarizer.sh` | OpenAI-compatible Chat Completions API |
 | `get-cloud-creds.sh` | Credentials decryption and export interface |
 | `bin/daily-memory-archiver` | CLI user-friendly wrapper |
+
+**Module Subdirectories**:
+- `scripts/extractors/` - Local keyword and message extraction
+- `scripts/summarizers/` - Cloud-based LLM summarization (chunkable for long context)
 
 ### Configuration Strategy
 - **Public config**: `config/config.yaml` (agent_id, thresholds, intervals, logging)

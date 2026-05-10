@@ -80,8 +80,8 @@ done < <(echo "$slice" | jq -c '.[]')
 # ============================================================================
 
 emit_section() {
-    local title="$1" icon="$2" body="$3"
-    echo "### $icon $title"
+    local title="$1" body="$2"
+    echo "**$title**"
     if [ -z "$(echo "$body" | tr -d '[:space:]')" ]; then
         echo "- 无"
     else
@@ -90,11 +90,11 @@ emit_section() {
     echo ""
 }
 
-emit_section "重要事实" "📌" "$facts"
-emit_section "决策与结论" "🎯" "$decisions"
-emit_section "已完成事项" "✅" "$done_items"
-emit_section "计划与待办" "📋" "$plans"
-emit_section "用户偏好" "🧠" "$preferences"
-emit_section "项目与技术要点" "🔧" "$project_notes"
-emit_section "风险与注意" "⚠️" "$risks"
-emit_section "关键讨论" "💬" "$discuss"
+emit_section "重要事实" "$facts"
+emit_section "决策与结论" "$decisions"
+emit_section "已完成事项" "$done_items"
+emit_section "计划与待办" "$plans"
+emit_section "用户偏好" "$preferences"
+emit_section "项目与技术要点" "$project_notes"
+emit_section "风险与注意" "$risks"
+emit_section "关键讨论" "$discuss"

@@ -498,31 +498,14 @@ do_archive() {
     local skip_write=0
     cooldown_blocks_write && skip_write=1
 
-    local total_new chunk_note PER_KEY_USAGE_ROW
+    local total_new chunk_note
     total_new=$msg_count
     messages_all=$(echo "$merge_result" | jq '.data')
     messages_stripped=$(echo "$merge_result" | jq '.stripped')
     messages_slice=$(echo "$messages_stripped" | jq --argjson take "$MESSAGES_TO_ANALYZE" '.[-($take):]')
     chunk_note="本地关键词：尾部 ${MESSAGES_TO_ANALYZE} 条；本周期新增 ${total_new} 条。"
 
-    PER_KEY_USAGE_ROW=""
-    for sk in "${MERGE_PAIR_KEYS[@]}"; do
-        [ -n "$PER_KEY_USAGE_ROW" ] && PER_KEY_USAGE_ROW+=" / "
-        PER_KEY_USAGE_ROW+="${sk}=${SESSION_USAGE_BY_KEY[$sk]}"
-    done
-
-    local insights cloud_block trigger_reason
-    case "${RUN_ARCHIVE_TRIGGER:-}" in
-        force) trigger_reason="手动强制归档" ;;
-        scheduled) trigger_reason="定时 / scheduled" ;;
-        hybrid_threshold) trigger_reason="hybrid 阈值" ;;
-        hybrid_periodic) trigger_reason="hybrid：定期归档间隔（用量未达阈值）" ;;
-        hybrid_interval) trigger_reason="hybrid 间隔（check_interval_minutes）" ;;
-        hybrid_first) trigger_reason="hybrid 首次（无 .last_archive_ts）" ;;
-        periodic) trigger_reason="定期归档间隔（用量未达阈值，有新增则写 memory）" ;;
-        threshold) trigger_reason="达到阈值" ;;
-        *) trigger_reason="归档（trigger=${RUN_ARCHIVE_TRIGGER:-?}）" ;;
-    esac
+    local insights cloud_block
 
     insights=""
     cloud_block=""
@@ -588,82 +571,24 @@ do_archive() {
         fi
 
         mkdir -p "$MEMORY_DIR"
-        local day fpath ts_local ts_iso
+        local day fpath ts_local
         day=$(date +%Y-%m-%d)
         fpath="$MEMORY_DIR/${day}.md"
         ts_local=$(date '+%Y-%m-%d %H:%M:%S')
-        ts_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
         # ====================================================================
-        # Dream 模式优化：YAML Frontmatter + 统一分类结构
-        # 便于 OpenClaw Dream 模式机器读取、索引、整合长期记忆
+        # Memory 文件输出：只保留实际记忆内容，避免 Dream 模式将模板/元数据当记忆
         # ====================================================================
         if [ ! -s "$fpath" ]; then
-            {
-                # 文件头：YAML Frontmatter - Dream 模式可直接解析
-                echo "---"
-                echo "# Daily Memory Archiver - OpenClaw 会话记忆"
-                echo "# 格式版本: 2.0 (Dream 模式优化版)"
-                echo "date: ${day}"
-                echo "created_at: ${ts_iso}"
-                echo "timezone: UTC"
-                echo "skill: daily-memory-archiver"
-                echo "schema_version: \"2.0\""
-                echo ""
-                echo "# 记忆类型标记 - Dream 模式检索用"
-                echo "memory_type: daily_conversation"
-                echo "memory_status: active"
-                echo "retention_days: 90"
-                echo "importance: medium"
-                echo ""
-                echo "# 今日统计（每次归档追加时更新）"
-                echo "total_archives: 1"
-                echo "total_messages: ${total_new}"
-                echo "session_keys: [${SESSION_MERGE_LABEL}]"
-                echo "categories: [facts, decisions, action_items, preferences, project_notes, risks]"
-                echo "---"
-                echo ""
-                echo "# ${day} - Daily Memory"
-                echo ""
-                echo "> 📌 此文件由 Daily Memory Archiver 自动生成，供 OpenClaw Dream 模式读取和整合"
-                echo ""
-            } >>"$fpath"
-        else
-            # 文件已存在，更新 YAML Frontmatter 中的统计
-            local temp_file total_arc
-            temp_file=$(mktemp)
-            # 更新 total_archives +1，追加 total_messages
-            if command -v awk >/dev/null 2>&1 && grep -q '^total_archives:' "$fpath" 2>/dev/null; then
-                total_arc=$(grep '^total_archives:' "$fpath" | awk '{print $2}')
-                total_arc=$((total_arc + 1))
-                awk -v n="$total_arc" '/^total_archives:/ {print "total_archives: " n; next} 1' "$fpath" >"$temp_file" && mv "$temp_file" "$fpath"
-            fi
+            echo "# ${day}" >>"$fpath"
+            echo "" >>"$fpath"
         fi
 
         {
             echo ""
-            echo "---"
-            echo ""
-            echo "## 📦 归档 - ${ts_local}"
-            echo ""
-            echo "> 📊 ${total_new} 条消息 · 触发原因：${trigger_reason}"
-            echo ""
-            echo "### 🔖 元数据"
-            echo ""
-            echo "- **Session**: ${SESSION_MERGE_LABEL}"
-            echo "- **Agent**: ${AGENT_ID}"
-            echo "- **用量**: ${USAGE_TOKENS:-0} tokens"
-            echo "- **各 Key**: ${PER_KEY_USAGE_ROW}"
-            echo ""
-            echo "---"
-            echo ""
-            echo "### 🔍 本地提取要点"
+            echo "## ${ts_local:11:5}"
             echo ""
             echo "$insights"
-            echo ""
-            echo "---"
-            echo ""
-            echo "### 🧠 LLM 深度归纳"
             echo ""
             echo "$cloud_block"
             echo ""
