@@ -1,5 +1,5 @@
 # Daily Memory Archiver 配置
-# 更新时间: 2026-04-10T19:02:06+08:00
+# 更新时间: 2026-05-23T13:17:25+08:00
 # api_url / api_token / model → credentials.enc（JSON 加密）
 
 openclaw:
@@ -18,24 +18,20 @@ archive:
     max_input_tokens: 200000
     check_interval_minutes: 5
     cooldown_minutes: 45
-  # 新增消息少于该条数时不写 memory（不推进检查点），避免零星对话重复摘要；--force 仍立即归档
   min_new_messages: 1
-  # 距上次成功写入 memory ≥ 该分钟数时，即使未达 200k 也跑归档（有新增则写）；compact 仍仅超限 key（见 compact_only_over_threshold）
+  # 距上次成功写入 memory ≥ 该分钟数时，即使未达 token 阈值也进入归档流程（有 ≥1 条检查点后的新消息则写）；0=关闭
   periodic_archive_minutes: 120
-  # true：仅对用量 ≥ max_input_tokens 的 session key 调用 sessions.compact
   compact_only_over_threshold: true
   compact:
     max_lines: 400
 
 analyzer:
   messages_to_analyze: 50
-  # 本周期新增超过 messages_to_analyze 时按段多次调用云端摘要，避免只摘要尾部导致丢失
   chunk_cloud_summary: true
   max_cloud_summary_chunks: 20
   cloud_summarizer:
     enabled: true
 
-# 日志：每次 archive 开头执行；亦可单独 daily-memory-archiver logs
 logging:
   log_max_bytes: 10485760
   log_keep_rotations: 5
@@ -43,17 +39,6 @@ logging:
 
 output:
   memory_dir: "~/.openclaw/workspace/memory"
-
-# 噪声过滤规则：用于过滤对话中的系统消息、heartbeat 等无意义内容
-# 可通过 OpenClaw 对话动态添加：/call skill daily-memory-archiver add-noise-pattern "[cron]"
-noise_filter:
-  custom_patterns:
-  custom_patterns: []
-  # 可通过 OpenClaw 对话动态添加：/call skill daily-memory-archiver add-noise-pattern "[cron]"
-  # custom_patterns:
-  #   - "[cron]"
-  #   - "heartbeat check"
-  #   - "system prompt"
 
 skill_version: "1.5.0"
 config_version: "8"

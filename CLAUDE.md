@@ -82,11 +82,13 @@ bash scripts/skill-interactive.sh                     # Conversation-based setup
 |:---|:---|
 | `archive-engine.sh` | Orchestration, flow control, checkpoint management |
 | `config-manager.sh` | Config initialization, credentials encryption, merge key management |
+| `skill-interactive.sh` | OpenClaw dialog interaction entry (`status`, `warnings`, `add-noise-pattern`, etc.) |
 | `lib/credentials-store.sh` | OpenSSL encryption/decryption layer |
 | `lib/log-maintenance.sh` | Log rotation (by age + size) |
 | `lib/conversation-noise.sh` | Context-aware noise filtering (removes system prompts, tool calls, etc.) for cleaner local extraction |
+| `lib/config-loader.sh` | Unified config loading (`yaml_scalar`, `yaml_bool`, `config_load_all`, `config_get_status_json`, `config_get_warnings`)
 | `extractors/local-extractor.sh` | Message JSON → Markdown keyword blocks |
-| `summarizers/cloud-summarizer.sh` | OpenAI-compatible Chat Completions API |
+| `summarizers/cloud-summarizer.sh` | OpenAI-compatible Chat Completions API (payload/response via temp files to avoid ARG_MAX) |
 | `get-cloud-creds.sh` | Credentials decryption and export interface |
 | `bin/daily-memory-archiver` | CLI user-friendly wrapper |
 
@@ -98,24 +100,30 @@ bash scripts/skill-interactive.sh                     # Conversation-based setup
 - **Public config**: `config/config.yaml` (agent_id, thresholds, intervals, logging)
 - **Secrets**: `config/credentials.enc` (encrypted JSON: `api_url`, `api_token`, `model`)
 - **Master key**: `config/.master_key` (gitignored)
-- **Runtime state**: `config/.archive_merge_checkpoint.json`, `config/.last_archive_meta.json`
+- **Runtime state**: `config/.archive_merge_checkpoint.json`, `config/.last_archive_meta.json`, `config/.last_archive_ts`, `config/.archive.lock`
 
 ### Environment Variable Overrides
 Critical ones to know:
 - `DAILY_MEMORY_CONFIG_DIR` - Override config directory
 - `DAILY_MEMORY_MERGE_KEYS` - Comma-separated session key list
 - `DAILY_MEMORY_LOG_MAX_BYTES` / `LOG_KEEP_ROTATIONS` / `LOG_MAX_AGE_DAYS`
-- `SKIP_SESSION_COMPACT=1` - Bypass compact operation
+- `DAILY_MEMORY_MEMORY_DIR` - Override memory output directory
+- `DAILY_MEMORY_PERIODIC_ARCHIVE_MINUTES` - Override periodic archive interval
+- `SKIP_SESSION_COMPACT=1` / `OPENCLAW_SKIP_COMPACT=1` - Bypass compact operation
 - `OPENCLAW_HOME` - Defaults to `~/.openclaw`
 
 ## Important Development Notes
 
-1. **Config parsing**: Uses `grep` + `sed` for yaml scalar extraction (not a full YAML parser) - keep key names globally unique
+1. **Config parsing**: Uses `grep` + `sed` for yaml scalar extraction via `yaml_scalar()` in `lib/config-loader.sh` (not a full YAML parser) — keep key names globally unique. List values (`merge_jsonl_keys`, `custom_patterns`) parsed by awk.
 2. **Bash version**: Requires bash 4.x for associative arrays (`declare -A`)
 3. **Gitignore**: `config/credentials.enc`, `config/.master_key`, `config/.archive_merge_checkpoint.json` must not be committed
-4. **Dual documentation**: 
+4. **Dual documentation**:
    - `SKILL.md` - User-facing (installation, cron, pairing, migration)
    - `README.md` - Maintainer-facing (architecture, config keys, checklist)
+5. **Lock file**: `archive` uses `flock -n` on `config/.archive.lock` for mutual exclusion; without `flock` available it proceeds without locking
+6. **Memory output format**: Files in `memory/YYYY-MM-DD.md` use YAML frontmatter (Dream mode metadata) + structured sections (local extraction + cloud summary). Cloud summarizer prompt enforces 8 fixed categories for cross-day scanning
+7. **Noise filtering**: `conversation-noise.sh` is context-aware — short heartbeat/tool lines are filtered, but longer messages or those containing discussion keywords are preserved. Custom patterns loaded from `config.yaml` `noise_filter.custom_patterns`
+8. **Cloud summarizer**: Uses temp files for payload/response to avoid `ARG_MAX` overflow and `curl: (23)` pipe-write failures
 
 ## Code Change Checklist
 
