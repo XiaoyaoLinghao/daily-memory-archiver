@@ -32,7 +32,9 @@ load_custom_noise_patterns() {
           inlist && /^[[:space:]]+[a-zA-Z_][a-zA-Z0-9_.-]*:/ && !/^([[:space:]]+-)/ { inlist=0 }
         ' "$config_file")
         while IFS= read -r p; do
-            [ -n "$p" ] && _CUSTOM_NOISE_PATTERNS+=("$p")
+            if [ -n "$p" ]; then
+                _CUSTOM_NOISE_PATTERNS+=("$p")
+            fi
         done <<<"$patterns"
     fi
 }
