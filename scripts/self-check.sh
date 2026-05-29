@@ -25,5 +25,11 @@ bash -n "$ROOT/scripts/archive-engine.sh" || fail "archive-engine bash -n"
 bash -n "$ROOT/scripts/config-manager.sh" || fail "config-manager bash -n"
 bash -n "$ROOT/scripts/lib/log-maintenance.sh" || fail "log-maintenance bash -n"
 
+if [ -x "$ROOT/scripts/test-extractor-titles.sh" ]; then
+    bash "$ROOT/scripts/test-extractor-titles.sh" || fail "extractor titles mismatch"
+else
+    fail "test-extractor-titles.sh missing"
+fi
+
 pass "依赖与脚本语法"
 exit "$ok"

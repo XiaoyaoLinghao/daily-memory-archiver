@@ -520,7 +520,7 @@ do_archive() {
                 api_tok=$(echo "$API_JSON" | jq -r .api_token)
                 model_id=$(echo "$API_JSON" | jq -r .model)
                 if [ -z "$api_url" ] || [ "$api_url" = "null" ] || [ -z "$api_tok" ] || [ "$api_tok" = "null" ] || [ -z "$model_id" ] || [ "$model_id" = "null" ]; then
-                    cloud_block="- *（凭证字段不完整，请 save-json）*"
+                    cloud_block="- *DMA-ERR: incomplete credentials (use save-json)*"
                 elif [ "$CHUNK_CLOUD_SUMMARY" = "1" ] && [ "$total_new" -gt "$MESSAGES_TO_ANALYZE" ]; then
                     full_chunks=$(( (total_new + MESSAGES_TO_ANALYZE - 1) / MESSAGES_TO_ANALYZE ))
                     chunk_start_ci=0
@@ -543,7 +543,7 @@ do_archive() {
                         if cloud_out=$("$CLOUD_SUMMARIZER" --file "$tmp_plain" "openai-compatible" "$model_id" "$api_url" "$api_tok" 2>>"$LOG_FILE"); then
                             cloud_block+="##### 云端段 ${sect}/${used_chunks}（消息序号 ${start}–${cend}）"$'\n\n'"$cloud_out"$'\n\n'
                         else
-                            cloud_block+="- *（段 ${sect}/${used_chunks} 摘要失败）*"$'\n\n'
+                            cloud_block+="- *DMA-ERR: chunk ${sect}/${used_chunks} summary failed*"$'\n\n'
                         fi
                         cidx=$((cidx + 1))
                     done
@@ -557,17 +557,17 @@ do_archive() {
                     if cloud_out=$("$CLOUD_SUMMARIZER" --file "$tmp_plain" "openai-compatible" "$model_id" "$api_url" "$api_tok" 2>>"$LOG_FILE"); then
                         cloud_block=$cloud_out
                     else
-                        cloud_block="- *（云端摘要失败，见日志）*"
+                        cloud_block="- *DMA-ERR: cloud summary failed (see log)*"
                     fi
                 fi
             else
-                cloud_block="- *（get-cloud-creds 失败；检查 .master_key 与 credentials.enc）*"
+                cloud_block="- *DMA-ERR: get-cloud-creds failed (check .master_key & credentials.enc)*"
             fi
             rm -f "$tmp_plain"
         elif cloud_summarizer_enabled; then
-            cloud_block="- *（无 credentials.enc）*"
+            cloud_block="- *DMA-ERR: no credentials.enc*"
         else
-            cloud_block="- *（云端摘要已关闭）*"
+            cloud_block="- *DMA-ERR: cloud summarizer disabled*"
         fi
 
         mkdir -p "$MEMORY_DIR"
@@ -580,8 +580,15 @@ do_archive() {
         # Memory 文件输出：只保留实际记忆内容，避免 Dream 模式将模板/元数据当记忆
         # ====================================================================
         if [ ! -s "$fpath" ]; then
-            echo "# ${day}" >>"$fpath"
-            echo "" >>"$fpath"
+            {
+                echo "---"
+                echo "title: \"${day} 会话记忆\""
+                echo "date: \"${day}\""
+                echo "---"
+                echo ""
+                echo "# ${day}"
+                echo ""
+            } >>"$fpath"
         fi
 
         {

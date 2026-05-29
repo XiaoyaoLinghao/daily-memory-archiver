@@ -33,6 +33,33 @@ description: |
 
 **从全局迁到工作区**：见本文 **§9**。
 
+### 0.2 与 Knowledge Weaver 的契约
+
+**Knowledge Weaver (KW)** 从本 skill 写入的 `memory/YYYY-MM-DD.md` 文件中提取知识实体。
+KW 维护一份规范文档 `KW_MEMORY_FILE_SPEC.md`（v1.0），本 skill 的输出必须严格遵守。
+
+**本 skill 必须保证**：
+
+1. **文件名**：`YYYY-MM-DD.md`，date 与文件名 ISO 8601 一致
+2. **frontmatter**：写入 `title` 与 `date` 字段（SPEC §3.1）
+3. **分类标题**（SPEC §4）必须**逐字符匹配**以下字符串：
+   - `**核心要点**`     → fact
+   - `**决策与结论**`   → decision
+   - `**已完成事项**`   → task
+   - `**待办与计划**`   → task
+   - `**用户偏好与习惯**` → preference
+   - `**技术/项目要点**`  → tech
+   - `**风险与注意事项**` → risk
+   - `**创意与想法**`   → idea
+   - `**关键讨论**`     → fact（v1.0 扩展分类，仅 local-extractor 使用）
+4. **失败占位符**（SPEC §6）：使用 `- *DMA-ERR: <reason>*` 格式
+
+**修改约束**：
+
+- 修改任意分类标题字符串前，必须确认 KW SPEC 当前版本支持新标题
+- 修改 `scripts/extractors/local-extractor.sh` 或 `scripts/summarizers/cloud-summarizer.sh` 中的 `**xxx**` 标题，必须更新本节并跑 `scripts/test-extractor-titles.sh`
+- 修改失败占位符格式，必须协调 KW 仓库 `_GARBAGE_PATTERNS` 同步增加
+
 ## 1. 依赖
 
 `bash`（建议 4.x，使用关联数组）、`jq`、`openssl`、`curl`；推荐 `flock`、`openclaw`（compact）。
