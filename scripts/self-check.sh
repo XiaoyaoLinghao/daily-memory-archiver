@@ -31,5 +31,11 @@ else
     fail "test-extractor-titles.sh missing"
 fi
 
+if [ -x "$ROOT/scripts/test-output-format.sh" ]; then
+    bash "$ROOT/scripts/test-output-format.sh" || fail "output format mismatch"
+else
+    fail "test-output-format.sh missing"
+fi
+
 pass "依赖与脚本语法"
 exit "$ok"

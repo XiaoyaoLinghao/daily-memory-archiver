@@ -121,7 +121,7 @@ Critical ones to know:
    - `SKILL.md` - User-facing (installation, cron, pairing, migration)
    - `README.md` - Maintainer-facing (architecture, config keys, checklist)
 5. **Lock file**: `archive` uses `flock -n` on `config/.archive.lock` for mutual exclusion; without `flock` available it proceeds without locking
-6. **Memory output format**: Files in `memory/YYYY-MM-DD.md` use YAML frontmatter (Dream mode metadata) + structured sections (local extraction + cloud summary). Cloud summarizer prompt enforces 8 fixed categories for cross-day scanning
+6. **Memory output format**: Files in `memory/YYYY-MM-DD.md` follow KW SPEC v1.1: YAML frontmatter + `## HH:MM` time slots + `### 原始细节` (local-extractor 8-category output) + `### 摘要` (cloud-summarizer narrative + `[关键X]` tags). KW indexes only `### 摘要` for entities; `### 原始细节` is preserved for OpenClaw memory_search verbatim recall.
 7. **Noise filtering**: `conversation-noise.sh` is context-aware — short heartbeat/tool lines are filtered, but longer messages or those containing discussion keywords are preserved. Custom patterns loaded from `config.yaml` `noise_filter.custom_patterns`
 8. **Cloud summarizer**: Uses temp files for payload/response to avoid `ARG_MAX` overflow and `curl: (23)` pipe-write failures
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # stdin: JSON [{role,content},…]；arg1：最多分析条数（从尾部截取）
-# 输出：供 Dream 模式读取的结构化本地提取要点
+# 输出：DMA daily memory 的 ### 原始细节 子分区内容，供 OpenClaw memory_search 召回原话细节
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="${DAILY_MEMORY_CONFIG_DIR:-$(cd "$SCRIPT_DIR/../../config" && pwd)}"
@@ -17,8 +17,10 @@ msgs=$(cat)
 slice=$(echo "$msgs" | jq --argjson t "$t" 'if length > $t then .[-($t):] else . end')
 
 # ============================================================================
-# 本地关键词提取 - Dream 模式优化版
-# 分类更明确，便于机器读取和跨天整合
+# 本地关键词提取 - 8 分类结构化输出
+# 输出会被 archive-engine.sh 包裹在 ### 原始细节 H3 子分区内
+# KW SPEC v1.1: 这一段不会被 KW 抽取实体（避免与 ### 摘要 段重复）
+# 主要用途：OpenClaw memory_search 召回用户原话与关键词
 # ============================================================================
 
 decisions=""        # 🎯 决策与结论
@@ -63,7 +65,8 @@ while IFS= read -r line; do
 done < <(echo "$slice" | jq -c '.[]')
 
 # ============================================================================
-# 输出统一格式（与 cloud-summarizer 分类一致，便于 Dream 模式整合）
+# 输出统一格式：8 个 KW 分类标题（KW SPEC v1.1 §4.1）
+# 注：cloud-summarizer 改用 ### 摘要 + [关键X] tag 格式，不再与本段重复
 # ============================================================================
 
 emit_section() {
