@@ -484,6 +484,13 @@ do_archive() {
         exit 0
     fi
 
+    # 无新增消息时直接跳过：保底机制/阈值/force 都不该写空文件
+    if [ "${msg_count:-0}" -eq 0 ]; then
+        log "[INFO] 无新增消息，跳过 memory 写入"
+        run_compact
+        exit 0
+    fi
+
     local bypass_min_new=0
     [ "${FORCE_RUN:-0}" = "1" ] && bypass_min_new=1
     [ "$USAGE_TOKENS" -ge "$MAX_INPUT_TOKENS" ] 2>/dev/null && bypass_min_new=1
