@@ -37,5 +37,17 @@ else
     fail "test-output-format.sh missing"
 fi
 
+if [ -x "$ROOT/scripts/test-fail-guard.sh" ]; then
+    bash "$ROOT/scripts/test-fail-guard.sh" || fail "fail guard structure"
+else
+    fail "test-fail-guard.sh missing"
+fi
+
+if [ -x "$ROOT/scripts/health-check.sh" ]; then
+    bash -n "$ROOT/scripts/health-check.sh" || fail "health-check bash -n"
+else
+    fail "health-check.sh missing"
+fi
+
 pass "依赖与脚本语法"
 exit "$ok"

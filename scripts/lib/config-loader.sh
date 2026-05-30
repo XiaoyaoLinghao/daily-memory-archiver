@@ -133,6 +133,9 @@ EOF
     [ "$_max_chunks" -lt 1 ] 2>/dev/null && _max_chunks=20
     echo "MAX_CLOUD_SUMMARY_CHUNKS=$_max_chunks"
     echo "CLOUD_SUMMARIZER_ENABLED=$(yaml_bool 'cloud_summarizer.enabled' 1 "$file")"
+    local _max_cloud_retry
+    _max_cloud_retry=$(canonical_uint "$(yaml_scalar max_cloud_retry "$file")" 20)
+    echo "MAX_CLOUD_RETRY=$_max_cloud_retry"
 
     cat <<'EOF'
 

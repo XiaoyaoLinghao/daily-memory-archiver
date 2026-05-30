@@ -31,6 +31,8 @@ analyzer:
   max_cloud_summary_chunks: 20
   cloud_summarizer:
     enabled: true
+    # 云端连续失败超过此次数后强制归档（避免 sessions 无限堆积），0=永不强制
+    max_cloud_retry: 20
 
 logging:
   log_max_bytes: 10485760

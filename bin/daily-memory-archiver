@@ -17,6 +17,7 @@ case "${1:-help}" in
         ;;
     logs|log-maintenance) exec bash "$ROOT/scripts/archive-engine.sh" log-maintenance ;;
     check|self-check) exec bash "$ROOT/scripts/self-check.sh" ;;
+    health-check) shift; exec bash "$ROOT/scripts/health-check.sh" "$@" ;;
     status) exec bash "$ROOT/scripts/config-manager.sh" status ;;
     creds) exec bash "$ROOT/scripts/config-manager.sh" show ;;
     # OpenClaw Skill 交互模式：JSON 输出供 LLM 解析

@@ -1,0 +1,5 @@
+# DMA 归档（每 30 分钟）
+*/30 * * * * cd /root/coding/projects/daily-memory-archiver && bash scripts/archive-engine.sh archive >> /root/.openclaw/logs/daily-memory-archiver.log 2>&1
+
+# DMA 每日健康检查（检测漏档风险，异常写 [ALERT] 日志）
+0 9 * * * cd /root/coding/projects/daily-memory-archiver && bash scripts/health-check.sh --days 3 >> /root/.openclaw/logs/daily-memory-archiver.log 2>&1

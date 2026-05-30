@@ -512,7 +512,8 @@ do_archive() {
     messages_slice=$(echo "$messages_stripped" | jq --argjson take "$MESSAGES_TO_ANALYZE" '.[-($take):]')
     chunk_note="本地关键词：尾部 ${MESSAGES_TO_ANALYZE} 条；本周期新增 ${total_new} 条。"
 
-    local insights cloud_block
+    local insights cloud_block cloud_recoverable_fail
+    cloud_recoverable_fail=0
 
     insights=""
     cloud_block=""
@@ -528,6 +529,7 @@ do_archive() {
                 model_id=$(echo "$API_JSON" | jq -r .model)
                 if [ -z "$api_url" ] || [ "$api_url" = "null" ] || [ -z "$api_tok" ] || [ "$api_tok" = "null" ] || [ -z "$model_id" ] || [ "$model_id" = "null" ]; then
                     cloud_block="- *DMA-ERR: incomplete credentials (use save-json)*"
+                    cloud_recoverable_fail=1
                 elif [ "$CHUNK_CLOUD_SUMMARY" = "1" ] && [ "$total_new" -gt "$MESSAGES_TO_ANALYZE" ]; then
                     full_chunks=$(( (total_new + MESSAGES_TO_ANALYZE - 1) / MESSAGES_TO_ANALYZE ))
                     chunk_start_ci=0
@@ -551,6 +553,7 @@ do_archive() {
                             cloud_block+="##### 云端段 ${sect}/${used_chunks}（消息序号 ${start}–${cend}）"$'\n\n'"$cloud_out"$'\n\n'
                         else
                             cloud_block+="- *DMA-ERR: chunk ${sect}/${used_chunks} summary failed*"$'\n\n'
+                            cloud_recoverable_fail=1
                         fi
                         cidx=$((cidx + 1))
                     done
@@ -565,10 +568,12 @@ do_archive() {
                         cloud_block=$cloud_out
                     else
                         cloud_block="- *DMA-ERR: cloud summary failed (see log)*"
+                        cloud_recoverable_fail=1
                     fi
                 fi
             else
                 cloud_block="- *DMA-ERR: get-cloud-creds failed (check .master_key & credentials.enc)*"
+                cloud_recoverable_fail=1
             fi
             rm -f "$tmp_plain"
         elif cloud_summarizer_enabled; then
@@ -577,58 +582,132 @@ do_archive() {
             cloud_block="- *DMA-ERR: cloud summarizer disabled*"
         fi
 
-        mkdir -p "$MEMORY_DIR"
-        local day fpath ts_local
-        day=$(date +%Y-%m-%d)
-        fpath="$MEMORY_DIR/${day}.md"
-        ts_local=$(date '+%Y-%m-%d %H:%M:%S')
+        if [ "$cloud_recoverable_fail" = "1" ]; then
+            # 云端可恢复失败：跳过本次写入/checkpoint/compact，等下个周期重试
+            local _retry_n
+            _retry_n=$(cat "$CONFIG_DIR/.cloud_retry_count" 2>/dev/null || echo 0)
+            _retry_n=$(canonical_uint "$_retry_n" 0)
+            _retry_n=$((_retry_n + 1))
+            echo "$_retry_n" >"$CONFIG_DIR/.cloud_retry_count"
+            log "[WARN] 云端摘要可恢复失败（第 ${_retry_n} 次），跳过本次 memory 写入/checkpoint/compact，下个周期重试。请检查 cloud API key / 凭据。"
 
-        # ====================================================================
-        # Memory 文件输出：只保留实际记忆内容，避免 KW 误抽元数据为实体
-        # ====================================================================
-        if [ ! -s "$fpath" ]; then
+            # retry 上限保护：超阈值则强制归档避免会话无限堆积
+            local _max_retry
+            _max_retry=$(canonical_uint "${MAX_CLOUD_RETRY:-20}" 20)
+            if [ "$_max_retry" -gt 0 ] && [ "$_retry_n" -ge "$_max_retry" ]; then
+                log "[ERROR] 云端摘要连续失败 ${_retry_n} 次，达上限 ${_max_retry}，强制归档（写入 DMA-ERR 占位 + 推进 checkpoint）避免 sessions 无限堆积。请立即修复 cloud 凭据。"
+                touch "$CONFIG_DIR/.cloud_fail_alert"
+
+                # 强制写入 memory + 推进 checkpoint（与正常路径逻辑相同）
+                mkdir -p "$MEMORY_DIR"
+                local day fpath ts_local
+                day=$(date +%Y-%m-%d)
+                fpath="$MEMORY_DIR/${day}.md"
+                ts_local=$(date '+%Y-%m-%d %H:%M:%S')
+                if [ ! -s "$fpath" ]; then
+                    {
+                        echo "---"
+                        echo "title: \"${day} 会话记忆\""
+                        echo "date: \"${day}\""
+                        echo "---"
+                        echo ""
+                        echo "# ${day}"
+                        echo ""
+                    } >>"$fpath"
+                fi
+                {
+                    echo ""
+                    echo "## ${ts_local:11:5}"
+                    echo ""
+                    echo "### 原始细节"
+                    echo ""
+                    echo "$insights"
+                    echo ""
+                    echo "### 摘要"
+                    echo ""
+                    echo "$cloud_block"
+                    echo ""
+                } >>"$fpath"
+                merge_checkpoint_bump_from_messages "$messages_all"
+                date +%s >"$CONFIG_DIR/.last_archive_ts"
+                local per_key_json sk_u uu
+                per_key_json="{}"
+                for sk_u in "${MERGE_PAIR_KEYS[@]}"; do
+                    uu=$(canonical_uint "${SESSION_USAGE_BY_KEY[$sk_u]:-0}" 0)
+                    per_key_json=$(jq -c --arg k "$sk_u" --argjson v "$uu" '. + {($k): $v}' <<<"$per_key_json")
+                done
+                jq -n --arg sk "$SESSION_MERGE_LABEL" \
+                    --argjson u "$(canonical_uint "$USAGE_TOKENS" 0)" \
+                    --argjson ts "$(date +%s)" \
+                    --argjson pk "$per_key_json" \
+                    '{session_key:$sk, usage_tokens:$u, ts:$ts, per_key_usage:$pk}' >"$CONFIG_DIR/.last_archive_meta.json"
+                log "[INFO] 已写入 $fpath（强制归档）；已更新合并检查点 $MERGE_CHECKPOINT_FILE"
+            fi
+        else
+            # 正常路径（含配置性禁用 no credentials.enc / cloud summarizer disabled）：
+            # 云端成功或用户主动关闭 → 正常归档 + 清零 retry 计数
+            : >"$CONFIG_DIR/.cloud_retry_count"
+            rm -f "$CONFIG_DIR/.cloud_fail_alert" 2>/dev/null || true
+
+            mkdir -p "$MEMORY_DIR"
+            local day fpath ts_local
+            day=$(date +%Y-%m-%d)
+            fpath="$MEMORY_DIR/${day}.md"
+            ts_local=$(date '+%Y-%m-%d %H:%M:%S')
+
+            # ====================================================================
+            # Memory 文件输出：只保留实际记忆内容，避免 KW 误抽元数据为实体
+            # ====================================================================
+            if [ ! -s "$fpath" ]; then
+                {
+                    echo "---"
+                    echo "title: \"${day} 会话记忆\""
+                    echo "date: \"${day}\""
+                    echo "---"
+                    echo ""
+                    echo "# ${day}"
+                    echo ""
+                } >>"$fpath"
+            fi
+
             {
-                echo "---"
-                echo "title: \"${day} 会话记忆\""
-                echo "date: \"${day}\""
-                echo "---"
                 echo ""
-                echo "# ${day}"
+                echo "## ${ts_local:11:5}"
+                echo ""
+                echo "### 原始细节"
+                echo ""
+                echo "$insights"
+                echo ""
+                echo "### 摘要"
+                echo ""
+                echo "$cloud_block"
                 echo ""
             } >>"$fpath"
+            merge_checkpoint_bump_from_messages "$messages_all"
+            date +%s >"$CONFIG_DIR/.last_archive_ts"
+            local per_key_json sk_u uu
+            per_key_json="{}"
+            for sk_u in "${MERGE_PAIR_KEYS[@]}"; do
+                uu=$(canonical_uint "${SESSION_USAGE_BY_KEY[$sk_u]:-0}" 0)
+                per_key_json=$(jq -c --arg k "$sk_u" --argjson v "$uu" '. + {($k): $v}' <<<"$per_key_json")
+            done
+            jq -n --arg sk "$SESSION_MERGE_LABEL" \
+                --argjson u "$(canonical_uint "$USAGE_TOKENS" 0)" \
+                --argjson ts "$(date +%s)" \
+                --argjson pk "$per_key_json" \
+                '{session_key:$sk, usage_tokens:$u, ts:$ts, per_key_usage:$pk}' >"$CONFIG_DIR/.last_archive_meta.json"
+            log "[INFO] 已写入 $fpath；已更新合并检查点 $MERGE_CHECKPOINT_FILE"
         fi
-
-        {
-            echo ""
-            echo "## ${ts_local:11:5}"
-            echo ""
-            echo "### 原始细节"
-            echo ""
-            echo "$insights"
-            echo ""
-            echo "### 摘要"
-            echo ""
-            echo "$cloud_block"
-            echo ""
-        } >>"$fpath"
-        merge_checkpoint_bump_from_messages "$messages_all"
-        date +%s >"$CONFIG_DIR/.last_archive_ts"
-        local per_key_json sk_u uu
-        per_key_json="{}"
-        for sk_u in "${MERGE_PAIR_KEYS[@]}"; do
-            uu=$(canonical_uint "${SESSION_USAGE_BY_KEY[$sk_u]:-0}" 0)
-            per_key_json=$(jq -c --arg k "$sk_u" --argjson v "$uu" '. + {($k): $v}' <<<"$per_key_json")
-        done
-        jq -n --arg sk "$SESSION_MERGE_LABEL" \
-            --argjson u "$(canonical_uint "$USAGE_TOKENS" 0)" \
-            --argjson ts "$(date +%s)" \
-            --argjson pk "$per_key_json" \
-            '{session_key:$sk, usage_tokens:$u, ts:$ts, per_key_usage:$pk}' >"$CONFIG_DIR/.last_archive_meta.json"
-        log "[INFO] 已写入 $fpath；已更新合并检查点 $MERGE_CHECKPOINT_FILE"
     else
         log "[INFO] 跳过 memory（冷却）"
     fi
-    run_compact
+
+    # compact 仅在非可恢复失败时执行
+    if [ "${cloud_recoverable_fail:-0}" != "1" ]; then
+        run_compact
+    else
+        log "[INFO] 云端失败，跳过 sessions.compact（保留原始会话供重试）"
+    fi
 }
 
 do_log_maintenance_only() {
