@@ -87,6 +87,13 @@ yaml_merge_keys() {
     ' "$file"
 }
 
+# 读取 substance_roles 列表（每行一个 role，默认 user）
+yaml_substance_roles() {
+    local file="${1:-$CONFIG_FILE_DEFAULT}"
+    [ -f "$file" ] || { printf 'user\n'; return; }
+    awk '/^analyzer:/{ins=1;next} ins&&/^[a-z][a-z0-9_]*:/&&!/^analyzer/{ins=0} ins&&/substance_roles:/{inlist=1;next} inlist&&/^[[:space:]]+-[[:space:]]/{line=$0; sub(/^[[:space:]]+-[[:space:]]+/,"",line); gsub(/^"|"$/,"",line); gsub(/^'\''|'\''$/,"",line); if(line!=""&&line!~/^#/){sub(/[[:space:]]+#.*$/,"",line); print line} next} inlist&&/^[[:space:]]+[a-zA-Z_]/&&!/^([[:space:]]+-)/{inlist=0}' "$file"
+}
+
 # ============================================================================
 # 统一配置校验：输出 shell 可 eval 的变量定义
 # 用法：eval "$(config_load_all)"
@@ -133,6 +140,10 @@ EOF
     [ "$_max_chunks" -lt 1 ] 2>/dev/null && _max_chunks=20
     echo "MAX_CLOUD_SUMMARY_CHUNKS=$_max_chunks"
     echo "CLOUD_SUMMARIZER_ENABLED=$(yaml_bool 'cloud_summarizer.enabled' 1 "$file")"
+    # substance_roles: 逗号分隔列表，默认 user
+    local _sr
+    _sr=$(yaml_substance_roles "$file" | paste -sd, - 2>/dev/null)
+    echo "SUBSTANCE_ROLES=\"${_sr:-user}\""
     local _max_cloud_retry
     _max_cloud_retry=$(canonical_uint "$(yaml_scalar max_cloud_retry "$file")" 20)
     echo "MAX_CLOUD_RETRY=$_max_cloud_retry"

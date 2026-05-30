@@ -48,10 +48,11 @@ slot_has_substance() {
         role=$(echo "$messages_json" | jq -r ".[$i].role // empty")
         content=$(echo "$messages_json" | jq -r ".[$i].content // empty")
         [ -z "$content" ] && continue
-        # 只对 user/assistant 文本做实质性判断；system/tool 元事件忽略
-        case "$role" in user) ;; *) continue ;; esac   # 仅 user 消息参与实质判定
-        if ! is_noise_message "$content"; then
-            return 0   # 找到实质内容，立即判定"有"
+        # 仅检查 SUBSTANCE_ROLES 中配置的角色，默认 user
+        if [[ ",${SUBSTANCE_ROLES:-user}," == *",$role,"* ]]; then
+            if ! is_noise_message "$content"; then
+                return 0   # 找到实质内容，立即判定"有"
+            fi
         fi
     done
     return 1           # 全部噪声

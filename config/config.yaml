@@ -29,6 +29,9 @@ analyzer:
   messages_to_analyze: 50
   chunk_cloud_summary: true
   max_cloud_summary_chunks: 20
+  # slot_has_substance 判定时检查的消息角色，默认仅 user；可追加 assistant 等
+  substance_roles:
+    - "user"
   cloud_summarizer:
     enabled: true
     # 云端连续失败超过此次数后强制归档（避免 sessions 无限堆积），0=永不强制
