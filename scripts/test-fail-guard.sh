@@ -25,7 +25,7 @@ for m in pattern.finditer(src):
     # 跳过函数定义（从 "merge_checkpoint_bump_from_messages()" 到下一个 "^}"）
     if definition_start > 0 and abs(idx - definition_start) < 10:
         continue
-    before = src[max(0, idx - 5000):idx]
+    before = src[max(0, idx - 8000):idx]
     if 'cloud_recoverable_fail' in before:
         ok += 1
     else:

@@ -621,7 +621,15 @@ do_archive() {
                     echo ""
                     echo "### 原始细节"
                     echo ""
-                    echo "$insights"
+                    # 保护：local-extractor 异常返回空时，原始细节不留白
+                    local insights_out
+                    if [ -z "$(printf '%s' "$insights" | tr -d '[:space:]')" ]; then
+                        insights_out="- *（本时段本地提取无输出）*"
+                        log "[WARN] local-extractor 返回空，原始细节写入占位标记"
+                    else
+                        insights_out="$insights"
+                    fi
+                    echo "$insights_out"
                     echo ""
                     echo "### 摘要"
                     echo ""
@@ -676,7 +684,15 @@ do_archive() {
                 echo ""
                 echo "### 原始细节"
                 echo ""
-                echo "$insights"
+                # 保护：local-extractor 异常返回空时，原始细节不留白
+                local insights_out
+                if [ -z "$(printf '%s' "$insights" | tr -d '[:space:]')" ]; then
+                    insights_out="- *（本时段本地提取无输出）*"
+                    log "[WARN] local-extractor 返回空，原始细节写入占位标记"
+                else
+                    insights_out="$insights"
+                fi
+                echo "$insights_out"
                 echo ""
                 echo "### 摘要"
                 echo ""
