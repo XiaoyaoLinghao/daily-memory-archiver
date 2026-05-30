@@ -74,6 +74,8 @@ _is_system_heartbeat() {
     if [[ "$s" == *'[heartbeat'* ]] || \
        [[ "$s" == '[heartbeat]'* ]] || \
        [[ "$s" == *'heartbeat check'* ]] || \
+       [[ "$s" == *'heartbeat poll'* ]] || \
+       [[ "$s" == *'[OpenClaw heartbeat'* ]] || \
        [[ "$s" == *'HEARTBEAT'* ]]; then
         return 0  # 是系统 heartbeat → 噪声
     fi

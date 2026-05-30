@@ -49,7 +49,7 @@ slot_has_substance() {
         content=$(echo "$messages_json" | jq -r ".[$i].content // empty")
         [ -z "$content" ] && continue
         # 只对 user/assistant 文本做实质性判断；system/tool 元事件忽略
-        case "$role" in user | assistant) ;; *) continue ;; esac
+        case "$role" in user) ;; *) continue ;; esac   # 仅 user 消息参与实质判定
         if ! is_noise_message "$content"; then
             return 0   # 找到实质内容，立即判定"有"
         fi
@@ -835,4 +835,7 @@ main_cli() {
     esac
 }
 
-main_cli "$@"
+# 仅在被直接执行时运行 CLI；被 source 时只导出函数，便于测试单独调用
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main_cli "$@"
+fi

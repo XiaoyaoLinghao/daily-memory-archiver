@@ -25,7 +25,6 @@ awk '/if ! slot_has_substance/,/exit 0/' "$SCRIPT_DIR/archive-engine.sh" | \
 pass "run_compact in noise branch"
 
 # 3. 结构断言 — Part A 在 MIN_NEW_MESSAGES 之前
-#    slot_has_substance 出现的行号 < min_new_messages 出现的行号
 n_noise=$(grep -n 'slot_has_substance "$messages_all"' "$SCRIPT_DIR/archive-engine.sh" | head -1 | cut -d: -f1)
 n_min=$(grep -n 'MIN_NEW_MESSAGES' "$SCRIPT_DIR/archive-engine.sh" | head -1 | cut -d: -f1)
 if [ "$n_noise" -lt "$n_min" ]; then
@@ -52,7 +51,7 @@ export DAILY_MEMORY_MEMORY_DIR="$TMPDIR/mem"
 mkdir -p "$DAILY_MEMORY_CONFIG_DIR" "$DAILY_MEMORY_MEMORY_DIR"
 
 # 6a. source archive-engine 函数（不便完整跑 archive，load_config 会因缺 sessions.json 失败）
-# 改为直接 source 并调用 finalize_empty_previous_day
+#     修复 W10.1-B 后 source-safe：BASH_SOURCE 守卫阻止了 main_cli 提前退出
 source "$SCRIPT_DIR/archive-engine.sh" 2>/dev/null || true
 
 # 模拟：昨天为活跃日，无文件 → 应生成标记
@@ -62,8 +61,10 @@ MEMORY_DIR="$DAILY_MEMORY_MEMORY_DIR" CONFIG_DIR="$DAILY_MEMORY_CONFIG_DIR" LOG_
     finalize_empty_previous_day
 marker="$DAILY_MEMORY_MEMORY_DIR/${yesterday}.md"
 if [ -f "$marker" ]; then
-    slots=$(grep -c '^## ' "$marker" 2>/dev/null || echo 0)
-    has_comment=$(grep -c '<!--' "$marker" 2>/dev/null || echo 0)
+    slots=$(grep -c '^## ' "$marker" 2>/dev/null | tr -d '[:space:]' || echo 0)
+    [ -z "$slots" ] && slots=0
+    has_comment=$(grep -c '<!--' "$marker" 2>/dev/null | tr -d '[:space:]' || echo 0)
+    [ -z "$has_comment" ] && has_comment=0
     if [ "$slots" -eq 0 ] && [ "$has_comment" -gt 0 ]; then
         pass "empty-day marker: 0 slots, HTML comment present"
     else
@@ -94,10 +95,14 @@ fi
 
 rm -rf "$TMPDIR"
 
-# 7. 回归测试
-bash "$SCRIPT_DIR/self-check.sh" 2>/dev/null | tail -1 | grep -q "OK" || fail "self-check failed"
-pass "self-check regression OK"
+# 6d. W10.1-D 心跳噪声断言：slot_has_substance + is_noise_message
+hb='[{"role":"user","content":"[OpenClaw heartbeat poll]"},{"role":"assistant","content":"Disk 37%，无 pending 子会话。\n\nHEARTBEAT_OK"}]'
+real='[{"role":"user","content":"[OpenClaw heartbeat poll]"},{"role":"user","content":"帮我评审 extractor.py 的抽取逻辑"}]'
+if slot_has_substance "$hb" 2>/dev/null; then fail "纯心跳槽被误判为有实质内容（W10.1-A 回归）"; else pass "纯心跳槽 -> 无实质（正确跳过）"; fi
+if slot_has_substance "$real" 2>/dev/null; then pass "含真实 user 输入 -> 有实质（正确写入）"; else fail "真实内容被漏判"; fi
+if is_noise_message "[OpenClaw heartbeat poll]" 2>/dev/null; then pass "[OpenClaw heartbeat poll] -> 噪声"; else fail "心跳标记未被识别为噪声"; fi
 
+# 7. 回归测试（直接调用各回归脚本，不回调 self-check.sh 避免递归）
 if [ -x "$SCRIPT_DIR/test-fail-guard.sh" ]; then
     bash "$SCRIPT_DIR/test-fail-guard.sh" >/dev/null 2>&1 || fail "fail-guard regression"
     pass "fail-guard regression OK"
