@@ -17,6 +17,8 @@ LOG_FILE="${DAILY_MEMORY_LOG:-$OPENCLAW_HOME/logs/daily-memory-archiver.log}"
 source "$SCRIPT_DIR/lib/log-maintenance.sh"
 # shellcheck source=lib/config-loader.sh
 source "$SCRIPT_DIR/lib/config-loader.sh"
+# shellcheck source=lib/conversation-noise.sh
+source "$SCRIPT_DIR/lib/conversation-noise.sh"
 
 LOCAL_EXTRACTOR="$SCRIPT_DIR/extractors/local-extractor.sh"
 CLOUD_SUMMARIZER="$SCRIPT_DIR/summarizers/cloud-summarizer.sh"
@@ -33,6 +35,58 @@ log() {
     if [ -t 2 ] 2>/dev/null; then
         printf '%s\n' "$line" >&2
     fi
+}
+
+# Wave 10: 判断一批消息是否含至少一条"实质内容"。
+# 入参：messages JSON 数组（每元素含 .role/.content）
+# 返回：0 = 有实质内容；1 = 全为心跳/系统噪声
+slot_has_substance() {
+    local messages_json="$1"
+    local n i content role
+    n=$(echo "$messages_json" | jq 'length' 2>/dev/null || echo 0)
+    for ((i = 0; i < n; i++)); do
+        role=$(echo "$messages_json" | jq -r ".[$i].role // empty")
+        content=$(echo "$messages_json" | jq -r ".[$i].content // empty")
+        [ -z "$content" ] && continue
+        # 只对 user/assistant 文本做实质性判断；system/tool 元事件忽略
+        case "$role" in user | assistant) ;; *) continue ;; esac
+        if ! is_noise_message "$content"; then
+            return 0   # 找到实质内容，立即判定"有"
+        fi
+    done
+    return 1           # 全部噪声
+}
+
+# Wave 10 Part B: 若"上一个活跃日"未产生任何 memory 文件（整日被跳过），
+# 在跨日后补写一个【零时间槽、KW 不收录】的空日标记文件。
+finalize_empty_previous_day() {
+    local today prev prev_file
+    today=$(date +%Y-%m-%d)
+    prev=$(cat "$CONFIG_DIR/.last_active_day" 2>/dev/null || echo "")
+
+    # 仅当确有"上一个活跃日"且它早于今天时才收尾（ISO 日期可直接字典序比较）
+    if [ -n "$prev" ] && [[ "$prev" < "$today" ]]; then
+        prev_file="$MEMORY_DIR/${prev}.md"
+        if [ ! -e "$prev_file" ]; then
+            mkdir -p "$MEMORY_DIR"
+            {
+                echo "---"
+                echo "title: \"${prev} 会话记忆\""
+                echo "date: \"${prev}\""
+                echo "---"
+                echo ""
+                echo "# ${prev}"
+                echo ""
+                echo "<!-- 本日无对话内容：DMA 全时段仅心跳/系统巡检，无实质用户交互。"
+                echo "     此标记为 HTML 注释、且文件不含任何时间槽与摘要，KW 结构性不收录；"
+                echo "     保留文件用于区分『当日无对话』与『DMA 故障/未运行（文件缺失）』。 -->"
+            } >>"$prev_file"
+            log "[INFO] Wave10: ${prev} 全天无实质对话，已写入空日标记 ${prev_file}（零时间槽，KW 不收录）。"
+        fi
+    fi
+
+    # 每周期更新"最近活跃日"为今天
+    echo "$today" >"$CONFIG_DIR/.last_active_day"
 }
 
 run_log_maintenance() {
@@ -395,6 +449,7 @@ run_compact_one() {
 
 do_archive() {
     load_config || exit 1
+    finalize_empty_previous_day
     run_log_maintenance
     resolve_session_key
     load_merge_session_keys
@@ -484,9 +539,12 @@ do_archive() {
         exit 0
     fi
 
-    # 无新增消息时直接跳过：保底机制/阈值/force 都不该写空文件
-    if [ "${msg_count:-0}" -eq 0 ]; then
-        log "[INFO] 无新增消息，跳过 memory 写入"
+    # Wave 10 Part A: 纯噪声时段——不写 memory，但推进 checkpoint + compact 以消费/丢弃消息。
+    messages_all=$(echo "$merge_result" | jq '.data')
+    if ! slot_has_substance "$messages_all"; then
+        log "[INFO] Wave10: 本时段 ${msg_count} 条消息均为心跳/系统巡检噪声，跳过 memory 写入；推进 checkpoint 并 compact 丢弃。"
+        merge_checkpoint_bump_from_messages "$messages_all"
+        date +%s >"$CONFIG_DIR/.last_archive_ts"
         run_compact
         exit 0
     fi

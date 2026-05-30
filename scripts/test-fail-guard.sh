@@ -16,22 +16,27 @@ grep -q '.cloud_retry_count' "$SCRIPT_DIR/archive-engine.sh" || { echo "FAIL: no
 python3 - "$SCRIPT_DIR/archive-engine.sh" <<'PY'
 import sys, re
 src = open(sys.argv[1]).read()
-# 找所有 merge_checkpoint_bump_from_messages 的调用位置（跳过函数定义）
+# 找所有 merge_checkpoint_bump_from_messages 的调用位置（跳过函数定义和 Wave 10 纯噪声分支）
 ok = 0
 pattern = re.compile(r'merge_checkpoint_bump_from_messages')
 definition_start = src.find('merge_checkpoint_bump_from_messages()')
 for m in pattern.finditer(src):
     idx = m.start()
-    # 跳过函数定义（从 "merge_checkpoint_bump_from_messages()" 到下一个 "^}"）
+    # 跳过函数定义
     if definition_start > 0 and abs(idx - definition_start) < 10:
         continue
-    before = src[max(0, idx - 8000):idx]
-    if 'cloud_recoverable_fail' in before:
+    # Wave 10 纯噪声分支：skip-substance 路径内的 checkpoint bump 不归 Wave 8 守护
+    before = src[max(0, idx - 300):idx]
+    if 'slot_has_substance' in src[max(0, idx - 2000):idx]:
+        ok += 1  # Wave 10 branch — counted but not checked for cloud_recoverable_fail
+        continue
+    before_wide = src[max(0, idx - 8000):idx]
+    if 'cloud_recoverable_fail' in before_wide:
         ok += 1
     else:
         print(f'FAIL: merge_checkpoint_bump call at pos {idx} not guarded')
         sys.exit(1)
-assert ok >= 2, f"Expected >= 2 guarded merge_checkpoint_bump calls, found {ok}"
+assert ok >= 3, f"Expected >= 3 guarded merge_checkpoint_bump calls, found {ok}"
 print(f"OK: checkpoint bump guarded ({ok} call sites)")
 PY
 

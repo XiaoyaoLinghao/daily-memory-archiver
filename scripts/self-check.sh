@@ -49,5 +49,11 @@ else
     fail "health-check.sh missing"
 fi
 
+if [ -x "$ROOT/scripts/test-wave10.sh" ]; then
+    bash "$ROOT/scripts/test-wave10.sh" || fail "wave10 structure"
+else
+    fail "test-wave10.sh missing"
+fi
+
 pass "依赖与脚本语法"
 exit "$ok"
