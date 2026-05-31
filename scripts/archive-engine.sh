@@ -487,6 +487,18 @@ do_reconcile() {
             continue
         fi
 
+        # 前置校验：检查 ## HH:MM 块内是否含 ### 原始细节(待补)
+        if ! awk -v h="## ${hhmm}" '
+            $0 == h { inb=1; next }
+            inb && /^## / { inb=0 }
+            inb && /^### 原始细节\(待补\)/ { found=1 }
+            END { exit !found }
+        ' "$md_file"; then
+            log "[WARN] reconcile: ${day}_${hhmm} 无待补块(孤儿 sidecar),删除并跳过"
+            rm -f "$sc"
+            continue
+        fi
+
         # 将 messages_all 转为 role: content 文本送云端
         tmp_plain=$(mktemp)
         chmod 600 "$tmp_plain"
@@ -507,13 +519,9 @@ do_reconcile() {
                     wrote=0
                 elif [ "$in_block" = "1" ]; then
                     if [[ "$line" == "## "* ]]; then
-                        # 遇到下一个时段，如果还没写摘要，补写
+                        # 遇到下一个时段，如果还没写摘要（前置校验已过滤孤儿，此处为防御）
                         if [ "$wrote" = "0" ]; then
-                            echo "" >>"$tmp_md"
-                            echo "### 摘要" >>"$tmp_md"
-                            echo "" >>"$tmp_md"
-                            echo "$cloud_out" >>"$tmp_md"
-                            echo "" >>"$tmp_md"
+                            log "[WARN] reconcile: ${day}_${hhmm} 未找到待补标记，跳过摘要追加（可能已补档）"
                         fi
                         echo "$line" >>"$tmp_md"
                         in_block=0
@@ -537,11 +545,7 @@ do_reconcile() {
             done <"$md_file"
             # 文件末尾仍在时段块内
             if [ "$in_block" = "1" ] && [ "$wrote" = "0" ]; then
-                echo "" >>"$tmp_md"
-                echo "### 摘要" >>"$tmp_md"
-                echo "" >>"$tmp_md"
-                echo "$cloud_out" >>"$tmp_md"
-                echo "" >>"$tmp_md"
+                log "[WARN] reconcile: ${day}_${hhmm} 未找到待补标记，跳过摘要追加（可能已补档）"
             fi
             mv "$tmp_md" "$md_file"
             rm -f "$sc"
