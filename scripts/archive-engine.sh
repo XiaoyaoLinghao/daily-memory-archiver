@@ -245,6 +245,7 @@ merged_jsonl_new_messages_json() {
           | select(
               (.content | length > 3) and (
                 ( .content | contains("[heartbeat") | not )
+                and ( .content | contains("heartbeat poll") | not )
                 and ( .content | contains("HEARTBEAT") | not )
                 and ( .content | contains("[tool") | not )
                 and ( .content | contains("toolCall") | not )
@@ -448,8 +449,114 @@ run_compact_one() {
     fi
 }
 
+# ===== Fix 3B: reconcile — 扫 .pending sidecar，调云端摘要替换(待补)块 =====
+do_reconcile() {
+    load_config || exit 1
+    local pending_dir="$MEMORY_DIR/.pending"
+    [ -d "$pending_dir" ] || { log "[INFO] reconcile: 无 .pending 目录，跳过"; return 0; }
+    local sidecars
+    sidecars=$(find "$pending_dir" -maxdepth 1 -name '*.json' -type f 2>/dev/null || true)
+    [ -n "$sidecars" ] || { log "[INFO] reconcile: 无待补 sidecar"; return 0; }
+
+    if ! cloud_summarizer_enabled || [ ! -f "$CONFIG_DIR/credentials.enc" ]; then
+        log "[INFO] reconcile: cloud_summarizer 禁用或无凭据，跳过"
+        return 0
+    fi
+
+    local API_JSON api_url api_tok model_id
+    API_JSON=$("$GET_CREDS" 2>>"$LOG_FILE")
+    api_url=$(echo "$API_JSON" | jq -r .api_url)
+    api_tok=$(echo "$API_JSON" | jq -r .api_token)
+    model_id=$(echo "$API_JSON" | jq -r .model)
+    if [ -z "$api_url" ] || [ "$api_url" = "null" ] || [ -z "$api_tok" ] || [ "$api_tok" = "null" ] || [ -z "$model_id" ] || [ "$model_id" = "null" ]; then
+        log "[WARN] reconcile: 凭据不完整，跳过"
+        return 0
+    fi
+
+    local sc day hhmm md_file tmp_plain cloud_out
+    while IFS= read -r sc; do
+        [ -f "$sc" ] || continue
+        local bn
+        bn=$(basename "$sc" .json)
+        day="${bn%%_*}"
+        hhmm="${bn#*_}"
+        md_file="$MEMORY_DIR/${day}.md"
+        if [ ! -f "$md_file" ]; then
+            log "[WARN] reconcile: .md 不存在 $md_file，删除孤儿 sidecar $sc"
+            rm -f "$sc"
+            continue
+        fi
+
+        # 将 messages_all 转为 role: content 文本送云端
+        tmp_plain=$(mktemp)
+        chmod 600 "$tmp_plain"
+        jq -r '.[] | "\(.role): \(.content)"' "$sc" | tr -d '\000' | head -c 120000 >"$tmp_plain"
+
+        if cloud_out=$("$CLOUD_SUMMARIZER" --file "$tmp_plain" "openai-compatible" "$model_id" "$api_url" "$api_tok" 2>>"$LOG_FILE"); then
+            # 成功：用 ### 摘要 就地替换 .md 中对应 ## HH:MM 的 ### 原始细节(待补) 块
+            # 幂等：用 ## HH:MM + (待补) 双标记锚定
+            local tmp_md
+            tmp_md=$(mktemp)
+            local in_block=0
+            local wrote=0
+            while IFS= read -r line; do
+                if [[ "$line" == "## ${hhmm}"* ]] && [ "$in_block" = "0" ]; then
+                    # 标记进入目标时段块，向前看确认有 (待补) 标记
+                    echo "$line" >>"$tmp_md"
+                    in_block=1
+                    wrote=0
+                elif [ "$in_block" = "1" ]; then
+                    if [[ "$line" == "## "* ]]; then
+                        # 遇到下一个时段，如果还没写摘要，补写
+                        if [ "$wrote" = "0" ]; then
+                            echo "" >>"$tmp_md"
+                            echo "### 摘要" >>"$tmp_md"
+                            echo "" >>"$tmp_md"
+                            echo "$cloud_out" >>"$tmp_md"
+                            echo "" >>"$tmp_md"
+                        fi
+                        echo "$line" >>"$tmp_md"
+                        in_block=0
+                    elif [[ "$line" == "### 原始细节(待补)" ]]; then
+                        # 找到待补标记，输出摘要替换
+                        echo "" >>"$tmp_md"
+                        echo "### 摘要" >>"$tmp_md"
+                        echo "" >>"$tmp_md"
+                        echo "$cloud_out" >>"$tmp_md"
+                        echo "" >>"$tmp_md"
+                        wrote=1
+                    elif [ "$wrote" = "1" ]; then
+                        # 已写摘要，跳过后续属于(待补)块的剩余行直到空行或下一个 ##
+                        :
+                    else
+                        echo "$line" >>"$tmp_md"
+                    fi
+                else
+                    echo "$line" >>"$tmp_md"
+                fi
+            done <"$md_file"
+            # 文件末尾仍在时段块内
+            if [ "$in_block" = "1" ] && [ "$wrote" = "0" ]; then
+                echo "" >>"$tmp_md"
+                echo "### 摘要" >>"$tmp_md"
+                echo "" >>"$tmp_md"
+                echo "$cloud_out" >>"$tmp_md"
+                echo "" >>"$tmp_md"
+            fi
+            mv "$tmp_md" "$md_file"
+            rm -f "$sc"
+            log "[INFO] reconcile: ${day}_${hhmm} 补档成功，sidecar 已删除"
+        else
+            log "[WARN] reconcile: ${day}_${hhmm} 云端调用失败，保留 sidecar 待下次重试"
+        fi
+        rm -f "$tmp_plain"
+    done <<<"$sidecars"
+}
+
 do_archive() {
     load_config || exit 1
+    # Fix 3B: 自动扫一次 .pending → 补档
+    do_reconcile
     finalize_empty_previous_day
     run_log_maintenance
     resolve_session_key
@@ -577,7 +684,9 @@ do_archive() {
     insights=""
     cloud_block=""
     if [ "$skip_write" = "0" ]; then
-        insights=$("$LOCAL_EXTRACTOR" - <<<"$messages_slice" "$MESSAGES_TO_ANALYZE" || true)
+        # Fix 2: normal path no longer needs LOCAL_EXTRACTOR;
+        # fallback (Fix 3) generates raw detail directly from messages_all
+        insights=""
         if cloud_summarizer_enabled && [ -f "$CONFIG_DIR/credentials.enc" ]; then
             local tmp_plain api_url api_tok model_id cloud_out full_chunks used_chunks chunk_start_ci cidx start chunk_json clen cend sect
             tmp_plain=$(mktemp)
@@ -657,12 +766,13 @@ do_archive() {
                 log "[ERROR] 云端摘要连续失败 ${_retry_n} 次，达上限 ${_max_retry}，强制归档（写入 DMA-ERR 占位 + 推进 checkpoint）避免 sessions 无限堆积。请立即修复 cloud 凭据。"
                 touch "$CONFIG_DIR/.cloud_fail_alert"
 
-                # 强制写入 memory + 推进 checkpoint（与正常路径逻辑相同）
-                mkdir -p "$MEMORY_DIR"
-                local day fpath ts_local
+                # Fix 3A 暂存：云端连续失败达上限 → 写入原始细节(待补) + sidecar
+                mkdir -p "$MEMORY_DIR" "$MEMORY_DIR/.pending"
+                local day fpath ts_local ts_hhmm
                 day=$(date +%Y-%m-%d)
                 fpath="$MEMORY_DIR/${day}.md"
                 ts_local=$(date '+%Y-%m-%d %H:%M:%S')
+                ts_hhmm="${ts_local:11:5}"
                 if [ ! -s "$fpath" ]; then
                     {
                         echo "---"
@@ -674,25 +784,23 @@ do_archive() {
                         echo ""
                     } >>"$fpath"
                 fi
+                # Fix 3A: 写入 ### 原始细节(待补) — 根据 raw_detail 决定内容量
+                local sidecar_path
+                sidecar_path="$MEMORY_DIR/.pending/${day}_${ts_hhmm}.json"
+                echo "$messages_all" >"$sidecar_path"
                 {
                     echo ""
-                    echo "## ${ts_local:11:5}"
+                    echo "## ${ts_hhmm}"
                     echo ""
-                    echo "### 原始细节"
-                    echo ""
-                    # 保护：local-extractor 异常返回空时，原始细节不留白
-                    local insights_out
-                    if [ -z "$(printf '%s' "$insights" | tr -d '[:space:]')" ]; then
-                        insights_out="- *（本时段本地提取无输出）*"
-                        log "[WARN] local-extractor 返回空，原始细节写入占位标记"
+                    if [ "$RAW_DETAIL" = "off" ]; then
+                        echo "### 原始细节(待补)"
+                        echo ""
+                        echo "- *（raw_detail=off：原始细节仅保留在 sidecar 中）*"
                     else
-                        insights_out="$insights"
+                        echo "### 原始细节(待补)"
+                        echo ""
+                        echo "$messages_all" | jq -r '.[] | if .role == "user" then "用户: \(.content)" elif .role == "assistant" then "助手: \(.content)" else "\(.role): \(.content)" end'
                     fi
-                    echo "$insights_out"
-                    echo ""
-                    echo "### 摘要"
-                    echo ""
-                    echo "$cloud_block"
                     echo ""
                 } >>"$fpath"
                 merge_checkpoint_bump_from_messages "$messages_all"
@@ -708,70 +816,132 @@ do_archive() {
                     --argjson ts "$(date +%s)" \
                     --argjson pk "$per_key_json" \
                     '{session_key:$sk, usage_tokens:$u, ts:$ts, per_key_usage:$pk}' >"$CONFIG_DIR/.last_archive_meta.json"
-                log "[INFO] 已写入 $fpath（强制归档）；已更新合并检查点 $MERGE_CHECKPOINT_FILE"
+                log "[INFO] 已写入 $fpath（待补归档）+ sidecar $sidecar_path；已更新合并检查点 $MERGE_CHECKPOINT_FILE"
             fi
         else
-            # 正常路径（含配置性禁用 no credentials.enc / cloud summarizer disabled）：
-            # 云端成功或用户主动关闭 → 正常归档 + 清零 retry 计数
+            # 正常路径：云端成功或 cloud_summarizer 禁用
             : >"$CONFIG_DIR/.cloud_retry_count"
             rm -f "$CONFIG_DIR/.cloud_fail_alert" 2>/dev/null || true
 
-            mkdir -p "$MEMORY_DIR"
-            local day fpath ts_local
-            day=$(date +%Y-%m-%d)
-            fpath="$MEMORY_DIR/${day}.md"
-            ts_local=$(date '+%Y-%m-%d %H:%M:%S')
-
-            # ====================================================================
-            # Memory 文件输出：只保留实际记忆内容，避免 KW 误抽元数据为实体
-            # ====================================================================
-            if [ ! -s "$fpath" ]; then
-                {
-                    echo "---"
-                    echo "title: \"${day} 会话记忆\""
-                    echo "date: \"${day}\""
-                    echo "---"
-                    echo ""
-                    echo "# ${day}"
-                    echo ""
-                } >>"$fpath"
+            local _sentinel_hit _sentinel_lc
+            _sentinel_hit=0
+            if cloud_summarizer_enabled; then
+                # ===== Fix 1b: 哨兵后闸 =====
+                # 主判据：cloud_block 不含任何 [关键 tag；辅判据：含哨兵短语
+                if [[ "$cloud_block" != *'[关键'* ]]; then
+                    _sentinel_lc=$(echo "$cloud_block" | tr '[:upper:]' '[:lower:]')
+                    if [[ "$_sentinel_lc" == *'无实质内容'* ]] || \
+                       [[ "$_sentinel_lc" == *'仅系统'* ]] || \
+                       [[ "$_sentinel_lc" == *'心跳'* ]]; then
+                        _sentinel_hit=1
+                        log "[INFO] Fix1b 哨兵后闸：云端摘要无 [关键 tag 且命中哨兵短语，不写块，推进 checkpoint + compact"
+                        merge_checkpoint_bump_from_messages "$messages_all"
+                        date +%s >"$CONFIG_DIR/.last_archive_ts"
+                        local per_key_json sk_u uu
+                        per_key_json="{}"
+                        for sk_u in "${MERGE_PAIR_KEYS[@]}"; do
+                            uu=$(canonical_uint "${SESSION_USAGE_BY_KEY[$sk_u]:-0}" 0)
+                            per_key_json=$(jq -c --arg k "$sk_u" --argjson v "$uu" '. + {($k): $v}' <<<"$per_key_json")
+                        done
+                        jq -n --arg sk "$SESSION_MERGE_LABEL" \
+                            --argjson u "$(canonical_uint "$USAGE_TOKENS" 0)" \
+                            --argjson ts "$(date +%s)" \
+                            --argjson pk "$per_key_json" \
+                            '{session_key:$sk, usage_tokens:$u, ts:$ts, per_key_usage:$pk}' >"$CONFIG_DIR/.last_archive_meta.json"
+                        run_compact
+                        exit 0
+                    fi
+                fi
             fi
 
-            {
-                echo ""
-                echo "## ${ts_local:11:5}"
-                echo ""
-                echo "### 原始细节"
-                echo ""
-                # 保护：local-extractor 异常返回空时，原始细节不留白
-                local insights_out
-                if [ -z "$(printf '%s' "$insights" | tr -d '[:space:]')" ]; then
-                    insights_out="- *（本时段本地提取无输出）*"
-                    log "[WARN] local-extractor 返回空，原始细节写入占位标记"
-                else
-                    insights_out="$insights"
+            if [ "$_sentinel_hit" = "0" ]; then
+                mkdir -p "$MEMORY_DIR"
+                local day fpath ts_local ts_hhmm
+                day=$(date +%Y-%m-%d)
+                fpath="$MEMORY_DIR/${day}.md"
+                ts_local=$(date '+%Y-%m-%d %H:%M:%S')
+                ts_hhmm="${ts_local:11:5}"
+
+                if [ ! -s "$fpath" ]; then
+                    {
+                        echo "---"
+                        echo "title: \"${day} 会话记忆\""
+                        echo "date: \"${day}\""
+                        echo "---"
+                        echo ""
+                        echo "# ${day}"
+                        echo ""
+                    } >>"$fpath"
                 fi
-                echo "$insights_out"
-                echo ""
-                echo "### 摘要"
-                echo ""
-                echo "$cloud_block"
-                echo ""
-            } >>"$fpath"
-            merge_checkpoint_bump_from_messages "$messages_all"
-            date +%s >"$CONFIG_DIR/.last_archive_ts"
-            local per_key_json sk_u uu
-            per_key_json="{}"
-            for sk_u in "${MERGE_PAIR_KEYS[@]}"; do
-                uu=$(canonical_uint "${SESSION_USAGE_BY_KEY[$sk_u]:-0}" 0)
-                per_key_json=$(jq -c --arg k "$sk_u" --argjson v "$uu" '. + {($k): $v}' <<<"$per_key_json")
-            done
-            jq -n --arg sk "$SESSION_MERGE_LABEL" \
-                --argjson u "$(canonical_uint "$USAGE_TOKENS" 0)" \
-                --argjson ts "$(date +%s)" \
-                --argjson pk "$per_key_json" \
-                '{session_key:$sk, usage_tokens:$u, ts:$ts, per_key_usage:$pk}' >"$CONFIG_DIR/.last_archive_meta.json"
-            log "[INFO] 已写入 $fpath；已更新合并检查点 $MERGE_CHECKPOINT_FILE"
+
+                if cloud_summarizer_enabled; then
+                    # ===== Fix 2: 正常路径——云端成功 → 写摘要（根据 raw_detail 决定是否同时写原始细节）=====
+                    if [ "$RAW_DETAIL" = "on" ]; then
+                        # 旧行为回滚：也写原始细节
+                        {
+                            echo ""
+                            echo "## ${ts_hhmm}"
+                            echo ""
+                            echo "### 原始细节"
+                            echo ""
+                            echo "$messages_all" | jq -r '.[] | if .role == "user" then "用户: \(.content)" elif .role == "assistant" then "助手: \(.content)" else "\(.role): \(.content)" end'
+                            echo ""
+                            echo "### 摘要"
+                            echo ""
+                            echo "$cloud_block"
+                            echo ""
+                        } >>"$fpath"
+                    else
+                        # Fix 2 默认 fallback_only: 只写摘要
+                        {
+                            echo ""
+                            echo "## ${ts_hhmm}"
+                            echo ""
+                            echo "### 摘要"
+                            echo ""
+                            echo "$cloud_block"
+                            echo ""
+                        } >>"$fpath"
+                    fi
+                else
+                    # ===== Fix 3A: cloud_summarizer 禁用 → 暂存原始细节(待补) =====
+                    mkdir -p "$MEMORY_DIR/.pending"
+                    local sidecar_path
+                    sidecar_path="$MEMORY_DIR/.pending/${day}_${ts_hhmm}.json"
+                    echo "$messages_all" >"$sidecar_path"
+                    {
+                        echo ""
+                        echo "## ${ts_hhmm}"
+                        echo ""
+                        if [ "$RAW_DETAIL" = "off" ]; then
+                            echo "### 原始细节(待补)"
+                            echo ""
+                            echo "- *（raw_detail=off：原始细节仅保留在 sidecar 中）*"
+                        else
+                            echo "### 原始细节(待补)"
+                            echo ""
+                            echo "$messages_all" | jq -r '.[] | if .role == "user" then "用户: \(.content)" elif .role == "assistant" then "助手: \(.content)" else "\(.role): \(.content)" end'
+                        fi
+                        echo ""
+                    } >>"$fpath"
+                    echo "$messages_all" >"$sidecar_path"
+                    log "[INFO] cloud_summarizer 禁用，已写入 $fpath（待补归档）+ sidecar $sidecar_path"
+                fi
+                merge_checkpoint_bump_from_messages "$messages_all"
+                date +%s >"$CONFIG_DIR/.last_archive_ts"
+                local per_key_json sk_u uu
+                per_key_json="{}"
+                for sk_u in "${MERGE_PAIR_KEYS[@]}"; do
+                    uu=$(canonical_uint "${SESSION_USAGE_BY_KEY[$sk_u]:-0}" 0)
+                    per_key_json=$(jq -c --arg k "$sk_u" --argjson v "$uu" '. + {($k): $v}' <<<"$per_key_json")
+                done
+                jq -n --arg sk "$SESSION_MERGE_LABEL" \
+                    --argjson u "$(canonical_uint "$USAGE_TOKENS" 0)" \
+                    --argjson ts "$(date +%s)" \
+                    --argjson pk "$per_key_json" \
+                    '{session_key:$sk, usage_tokens:$u, ts:$ts, per_key_usage:$pk}' >"$CONFIG_DIR/.last_archive_meta.json"
+                log "[INFO] 已写入 $fpath；已更新合并检查点 $MERGE_CHECKPOINT_FILE"
+            fi
         fi
     else
         log "[INFO] 跳过 memory（冷却）"
@@ -823,9 +993,14 @@ main_cli() {
         log-maintenance|logs)
             do_log_maintenance_only
             ;;
+        reconcile)
+            exec 9>>"$LOCK_FILE"
+            with_lock do_reconcile
+            ;;
         help)
             echo "Usage: $0 archive [--force] [--session <key>] [--agent <id>]"
             echo "       $0 log-maintenance   # 仅执行日志天龄清理 + 按大小轮转（读 config.yaml）"
+            echo "       $0 reconcile          # 扫描 .pending 目录，补档待补摘要"
             echo "多通道: session.merge_jsonl_keys 或 DAILY_MEMORY_MERGE_KEYS"
             echo "日志: logging.log_max_bytes / log_keep_rotations / log_max_age_days；环境变量见 README"
             ;;

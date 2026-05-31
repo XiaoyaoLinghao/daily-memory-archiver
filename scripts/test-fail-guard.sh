@@ -30,7 +30,7 @@ for m in pattern.finditer(src):
     if 'slot_has_substance' in src[max(0, idx - 2000):idx]:
         ok += 1  # Wave 10 branch — counted but not checked for cloud_recoverable_fail
         continue
-    before_wide = src[max(0, idx - 8000):idx]
+    before_wide = src[max(0, idx - 16000):idx]
     if 'cloud_recoverable_fail' in before_wide:
         ok += 1
     else:

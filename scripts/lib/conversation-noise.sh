@@ -114,6 +114,15 @@ _is_system_tool_call() {
 # ========== 单行噪声检测（包含自定义模式 ==========
 is_conversation_noise_line() {
     local s="$1"
+    local lc
+    lc=$(echo "$s" | tr '[:upper:]' '[:lower:]')
+
+    # ===== Fix 1a: 廉价前闸 — 早段精确匹配 =====
+    # OpenClaw heartbeat poll 精确识别
+    [[ "$s" == *'[OpenClaw heartbeat poll]'* ]] && return 0
+
+    # 网关重启续接通知
+    [[ "$lc" == *'previous turn was interrupted by a gateway restart'* ]] && return 0
 
     # 代码块标记
     [[ "$s" == *'```'* ]] && return 0
@@ -124,12 +133,11 @@ is_conversation_noise_line() {
     # ⚡ 上下文感知工具调用
     _is_system_tool_call "$s" && return 0
 
-    # 系统消息 / Sender 相关
+    # 系统消息 / Sender 相关（Fix 1a: 大小写不敏感，覆盖 (System)/(SYSTEM)/(system)）
     [[ "$s" == *'Sender (untrusted'* ]] && return 0
-    [[ "$s" == *'[system'* ]] && return 0
-    [[ "$s" == *'[SYSTEM'* ]] && return 0
-    [[ "$s" == *'system prompt'* ]] && return 0
-    [[ "$s" == *'System prompt'* ]] && return 0
+    [[ "$lc" == *'[system'* ]] && return 0
+    [[ "$lc" == *'(system'* ]] && return 0
+    [[ "$lc" == *'system prompt'* ]] && return 0
 
     # MCP / 服务相关
     [[ "$s" == *'[MCP'* ]] && return 0

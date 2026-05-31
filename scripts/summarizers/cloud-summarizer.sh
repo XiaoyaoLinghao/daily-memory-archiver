@@ -94,7 +94,7 @@ if ! jq -n \
     --arg m "$model" \
     --arg s "$sys" \
     --rawfile b "$body_tmp" \
-    '{model:$m, temperature: 0.3, messages:[{role:"system",content:$s},{role:"user",content:("请归纳以下对话内容，严格按照 8 个分类的 Markdown 格式输出：\n\n" + $b)}]}' \
+    '{model:$m, temperature: 0.3, messages:[{role:"system",content:$s},{role:"user",content:("请归纳以下对话内容，按系统提示中的格式输出摘要与关键 tag：\n\n" + $b)}]}' \
     >"$payload_tmp" 2>/dev/null; then
     echo "- *（构建请求 JSON 失败；检查 jq 版本与输入内容）*" >&2
     exit 1

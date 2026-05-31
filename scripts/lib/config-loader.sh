@@ -164,6 +164,10 @@ EOF
 # ===== output =====
 EOF
     echo "MEMORY_DIR=\"$(yaml_scalar memory_dir "$file" || echo '')\""
+    local _raw_detail
+    _raw_detail=$(yaml_scalar raw_detail "$file" || echo fallback_only)
+    case "$_raw_detail" in on|off|fallback_only) ;; *) _raw_detail="fallback_only" ;; esac
+    echo "RAW_DETAIL=\"$_raw_detail\""
 
     cat <<'EOF'
 
