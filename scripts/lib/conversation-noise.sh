@@ -137,7 +137,7 @@ is_conversation_noise_line() {
     [[ "$s" == *'Sender (untrusted'* ]] && return 0
     [[ "$lc" == *'[system'* ]] && return 0
     [[ "$lc" == *'(system'* ]] && return 0
-    [[ "$lc" == *'system prompt'* ]] && return 0
+    [[ "$lc" == 'system prompt'* ]] && return 0
 
     # MCP / 服务相关
     [[ "$s" == *'[MCP'* ]] && return 0

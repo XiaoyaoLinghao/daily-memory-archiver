@@ -527,7 +527,6 @@ do_reconcile() {
                         in_block=0
                     elif [[ "$line" == "### 原始细节(待补)" ]]; then
                         # 找到待补标记，输出摘要替换
-                        echo "" >>"$tmp_md"
                         echo "### 摘要" >>"$tmp_md"
                         echo "" >>"$tmp_md"
                         echo "$cloud_out" >>"$tmp_md"
