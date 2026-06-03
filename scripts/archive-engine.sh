@@ -558,6 +558,17 @@ do_reconcile() {
 
 do_archive() {
     load_config || exit 1
+    # W2/B: best-effort fetch the KW project lexicon and export it so the cloud
+    # summarizer outputs canonical project names in ### 结构化事实. Opt-in via
+    # DAILY_MEMORY_LEXICON_CMD (e.g. "python3 -m knowledge_weaver.registry --lexicon");
+    # disabled when unset, so default behaviour is unchanged.
+    if [ -n "${DAILY_MEMORY_LEXICON_CMD:-}" ] && [ -z "${DAILY_MEMORY_LEXICON:-}" ]; then
+        _lex=$(timeout 15 ${DAILY_MEMORY_LEXICON_CMD} 2>/dev/null || true)
+        if [ -n "$_lex" ]; then
+            export DAILY_MEMORY_LEXICON="$_lex"
+            log "[INFO] W2: 已注入项目词表到云端摘要器（${#_lex} 字节）"
+        fi
+    fi
     # Fix 3B: 自动扫一次 .pending → 补档
     do_reconcile
     finalize_empty_previous_day
