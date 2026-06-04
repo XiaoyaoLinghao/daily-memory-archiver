@@ -34,7 +34,10 @@ facts=""            # 📌 核心要点
 
 while IFS= read -r line; do
     role=$(echo "$line" | jq -r '.role')
-    content=$(echo "$line" | jq -r '.content // ""' | tr '\n\r' '  ' | head -c 600)
+    # D8: char-based truncation (consistent with the ${content:0:N} cuts below) —
+    # `head -c 600` cut at a BYTE boundary, splitting multibyte UTF-8 mid-character.
+    content=$(echo "$line" | jq -r '.content // ""' | tr '\n\r' '  ')
+    content="${content:0:600}"
     # 先检查整条消息是否为噪声
     is_noise_message "$content" && continue
     # 再检查单行噪声

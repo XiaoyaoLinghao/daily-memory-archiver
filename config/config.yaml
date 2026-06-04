@@ -50,5 +50,5 @@ output:
   #   off — 连 fallback 也不写逐字（仅占位）
   raw_detail: "fallback_only"
 
-skill_version: "1.6.2"
+skill_version: "1.6.3"
 config_version: "8"
