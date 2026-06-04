@@ -43,7 +43,13 @@ log() {
 slot_has_substance() {
     local messages_json="$1"
     local n i content role
-    n=$(echo "$messages_json" | jq 'length' 2>/dev/null || echo 0)
+    # D4: distinguish a jq PARSE FAILURE from a valid empty array. On failure,
+    # conservatively treat the slot as substantive (return 0) so a transient jq
+    # error never advances the checkpoint and discards real content.
+    if ! n=$(echo "$messages_json" | jq 'length' 2>/dev/null); then
+        log "[WARN] slot_has_substance: jq 解析失败，保守判为有实质内容（不丢槽）"
+        return 0
+    fi
     for ((i = 0; i < n; i++)); do
         role=$(echo "$messages_json" | jq -r ".[$i].role // empty")
         content=$(echo "$messages_json" | jq -r ".[$i].content // empty")
@@ -914,8 +920,11 @@ do_archive() {
                 # 鲁棒）；回退：完全没有任一知识 tag（9 种，不只 [关键) + 块短(#5) + 哨兵短语。
                 if [[ "$cloud_block" == *'[空时段]'* ]]; then
                     _sentinel_hit=1
-                elif ! grep -qE '^\[(关键|已完成|待办|创意)' <<<"$cloud_block" \
+                elif [[ "$cloud_block" != *'结构化事实'* ]] \
+                     && ! grep -qE '^\[(关键|已完成|待办|创意)' <<<"$cloud_block" \
                      && [ "${#cloud_block}" -lt 280 ]; then
+                    # D6: a block carrying a ### 结构化事实 fence is substantive — never
+                    # drop it via the heuristic fallback even if short + mentions 心跳.
                     _sentinel_lc=$(echo "$cloud_block" | tr '[:upper:]' '[:lower:]')
                     if [[ "$_sentinel_lc" == *'无实质内容'* ]] || \
                        [[ "$_sentinel_lc" == *'仅系统'* ]] || \
@@ -1011,11 +1020,14 @@ do_archive() {
         log "[INFO] 跳过 memory（冷却）"
     fi
 
-    # compact 仅在非可恢复失败时执行
-    if [ "${cloud_recoverable_fail:-0}" != "1" ]; then
-        run_compact
-    else
+    # compact 仅在非可恢复失败、且本周期确实写入/推进了 checkpoint 时执行。
+    # D1: 冷却跳过写入+checkpoint 时绝不能 compact——否则未归档消息会被截断丢失。
+    if [ "${cloud_recoverable_fail:-0}" = "1" ]; then
         log "[INFO] 云端失败，跳过 sessions.compact（保留原始会话供重试）"
+    elif [ "${skip_write:-0}" = "1" ]; then
+        log "[INFO] 冷却跳过写入：同时跳过 sessions.compact（避免截断未归档消息）"
+    else
+        run_compact
     fi
 }
 

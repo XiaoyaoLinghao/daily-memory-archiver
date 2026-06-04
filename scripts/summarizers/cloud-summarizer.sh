@@ -159,7 +159,7 @@ if ! jq empty "$resp_tmp" 2>/dev/null; then
 fi
 
 if jq -e '.error' "$resp_tmp" >/dev/null 2>&1; then
-    echo "- *（API 错误: $(jq -r '.error.message // .error | tostring' "$resp_tmp")）*" >&2
+    echo "- *（API 错误: $(jq -r '(.error.message? // .error) | tostring' "$resp_tmp")）*" >&2
     exit 1
 fi
 

@@ -1,7 +1,7 @@
 ---
 name: daily-memory-archiver
 description: |
-  Daily Memory Archiver v1.6.2 — OpenClaw 会话归档：按 session key 统计用量、检查点后仅合并新增消息、可选分块云端摘要、默认仅对超限 key 执行 sessions.compact。推荐根目录 ~/.openclaw/workspace/skills/daily-memory-archiver（自维护）；亦支持 ~/.openclaw/skills/daily-memory-archiver（全局）。
+  Daily Memory Archiver v1.6.3 — OpenClaw 会话归档：按 session key 统计用量、检查点后仅合并新增消息、可选分块云端摘要、默认仅对超限 key 执行 sessions.compact。推荐根目录 ~/.openclaw/workspace/skills/daily-memory-archiver（自维护）；亦支持 ~/.openclaw/skills/daily-memory-archiver（全局）。
 
   **必须读取本 Skill 时**：安装/配置 API、定时归档、credentials.enc、merge_jsonl_keys、检查点、pairing、多通道、get-cloud-creds、archive-engine。
 
@@ -12,7 +12,7 @@ description: |
 
 # Daily Memory Archiver
 
-**文档与实现版本：1.6.2**（`config.yaml` 中 `skill_version` 可与本文不一致时，以本文与脚本为准。）
+**文档与实现版本：1.6.3**（`config.yaml` 中 `skill_version` 可与本文不一致时，以本文与脚本为准。）
 
 ## 0. 核心思路
 
@@ -232,7 +232,7 @@ logging:
 output:
   memory_dir: "~/.openclaw/workspace/memory"
 
-skill_version: "1.6.2"
+skill_version: "1.6.3"
 config_version: "8"
 ```
 

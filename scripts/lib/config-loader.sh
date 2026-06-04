@@ -12,9 +12,12 @@ CONFIG_FILE_DEFAULT="$CRED_DIR/config.yaml"
 yaml_scalar() {
     local key="$1" file="${2:-$CONFIG_FILE_DEFAULT}"
     [ -f "$file" ] || return 0
+    # D3: strip an INLINE comment only when '#' is preceded by whitespace — a '#'
+    # inside a value (path '/srv/a#b', token 'sk-A#9') has no leading space and is
+    # KEPT. (Strip the comment BEFORE quotes so a quoted value's '#' survives.)
     grep -E "^[[:space:]]*${key}:" "$file" 2>/dev/null | head -1 | \
         sed -E "s/^[[:space:]]*${key}:[[:space:]]*//" | \
-        sed -E 's/^["'\'']//;s/["'\'']$//;s/[[:space:]]*$//;s/#.*$//'
+        sed -E 's/[[:space:]]+#.*$//;s/^["'\'']//;s/["'\'']$//;s/[[:space:]]*$//'
 }
 
 # yaml_bool: 读取布尔值，归一化为 0/1

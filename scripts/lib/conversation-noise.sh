@@ -124,8 +124,9 @@ is_conversation_noise_line() {
     # 网关重启续接通知
     [[ "$lc" == *'previous turn was interrupted by a gateway restart'* ]] && return 0
 
-    # 代码块标记
-    [[ "$s" == *'```'* ]] && return 0
+    # 代码块【裸围栏行】视为噪声（``` 或 ```lang 单独成行）；含正文的行保留
+    # (D2: 单行的代码提问如 "看这段 ```print(1)```" 不再被整条丢弃)
+    case "${s//[[:space:]]/}" in '```'*) [ "${#s}" -le 16 ] && return 0 ;; esac
 
     # ⚡ 上下文感知 heartbeat（优先于通用规则
     _is_system_heartbeat "$s" && return 0
@@ -154,18 +155,17 @@ is_conversation_noise_line() {
     [[ "$s" == *'>>>'* ]] && return 0  # >>> 函数调用结束
     [[ "$s" == *'Function invocation'* ]] && return 0
 
-    # 纯 JSON 对象（工具参数或返回值
-    [[ "$s" =~ ^\ *\{\" ]] && return 0
+    # 整行就是一个 JSON 对象（工具参数/返回值）才算噪声；D5: 含正文的行如
+    # '{"k":"v"} 这是我想存的配置' 以正文结尾、不算噪声
+    [[ "$s" =~ ^[[:space:]]*\{\".*\}[[:space:]]*$ ]] && return 0
 
     # 空行或几乎空行
     local trimmed
     trimmed=$(echo "$s" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     [[ -z "$trimmed" || ${#trimmed} -lt 4 ]] && return 0
 
-    # 重复的单字符行
-    [[ "$s" == *'-----'* ]] && return 0
-    [[ "$s" == *'====='* ]] && return 0
-    [[ "$s" == *'_____'* ]] && return 0
+    # 整行【只是】装饰分隔线才算噪声；D5: 正文中提到 '-----' 等不再误判
+    [[ "$s" =~ ^[[:space:]]*[-=_]{4,}[[:space:]]*$ ]] && return 0
 
     # 无意义的系统状态行
     [[ "$s" == *'[INFO]'* && ${#s} -lt 50 ]] && return 0
