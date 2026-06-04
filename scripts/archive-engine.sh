@@ -464,6 +464,68 @@ inject_lexicon() {
     fi
 }
 
+# #9: render the verbatim raw-detail body once (was inlined in 3 write paths).
+# Uses the caller's $messages_all via bash dynamic scope.
+render_raw_detail() {
+    echo "$messages_all" | jq -r '.[] | if .role == "user" then "用户: \(.content)" elif .role == "assistant" then "助手: \(.content)" else "\(.role): \(.content)" end'
+}
+
+# #9: the successful-archive bookkeeping ritual (checkpoint bump + per-key usage
+# meta) was copy-pasted across the force-fail / sentinel-hit / normal paths.
+# Uses caller-scoped $messages_all / $MERGE_PAIR_KEYS / $SESSION_* / $USAGE_TOKENS.
+finalize_archive_bookkeeping() {
+    merge_checkpoint_bump_from_messages "$messages_all"
+    date +%s >"$CONFIG_DIR/.last_archive_ts"
+    local per_key_json sk_u uu
+    per_key_json="{}"
+    for sk_u in "${MERGE_PAIR_KEYS[@]}"; do
+        uu=$(canonical_uint "${SESSION_USAGE_BY_KEY[$sk_u]:-0}" 0)
+        per_key_json=$(jq -c --arg k "$sk_u" --argjson v "$uu" '. + {($k): $v}' <<<"$per_key_json")
+    done
+    jq -n --arg sk "$SESSION_MERGE_LABEL" \
+        --argjson u "$(canonical_uint "$USAGE_TOKENS" 0)" \
+        --argjson ts "$(date +%s)" \
+        --argjson pk "$per_key_json" \
+        '{session_key:$sk, usage_tokens:$u, ts:$ts, per_key_usage:$pk}' >"$CONFIG_DIR/.last_archive_meta.json"
+}
+
+# #7+#8: collapse every ```json structured-facts fence in the summary into ONE
+# validated, deduped fence (chunk mode emits one per chunk under separate
+# "### 结构化事实" headers, which KW can't parse). Invalid JSON fences are
+# stripped (#8) so malformed model output never reaches the memory file. Echoes
+# the cleaned block (narrative unchanged when there are no fences).
+consolidate_structured_facts() {
+    local block="$1" td narrative merged f
+    case "$block" in *'```json'*) : ;; *) printf '%s' "$block"; return 0 ;; esac
+    td=$(mktemp -d) || { printf '%s' "$block"; return 0; }
+    narrative=$(awk -v td="$td" '
+        /^### 结构化事实[[:space:]]*$/ { next }
+        /^```json[[:space:]]*$/ { inj=1; n++; next }
+        inj && /^```[[:space:]]*$/ { inj=0; next }
+        inj { print >> (td "/f" n ".json"); next }
+        { print }
+    ' <<<"$block")
+    local valid=()
+    for f in "$td"/f*.json; do
+        [ -e "$f" ] || continue
+        if jq -e 'type=="array"' "$f" >/dev/null 2>&1; then
+            valid+=("$f")
+        else
+            log "[WARN] structured-facts 围栏非法 JSON，已剥离"
+        fi
+    done
+    merged="[]"
+    [ ${#valid[@]} -gt 0 ] && merged=$(jq -s 'add | unique_by({type,name})' "${valid[@]}" 2>/dev/null || echo "[]")
+    rm -rf "$td"
+    # strip trailing blank lines the awk may have left, then append one fence
+    narrative=$(printf '%s\n' "$narrative" | sed -e :a -e '/^\n*$/{$d;N;ba}')
+    if [ "$(jq 'length' <<<"$merged" 2>/dev/null || echo 0)" -gt 0 ]; then
+        printf '%s\n\n### 结构化事实\n\n```json\n%s\n```' "$narrative" "$(jq '.' <<<"$merged")"
+    else
+        printf '%s' "$narrative"
+    fi
+}
+
 do_reconcile() {
     load_config || exit 1
     inject_lexicon   # #6: standalone `reconcile` must also get canonical names
@@ -828,23 +890,11 @@ do_archive() {
                     else
                         echo "### 原始细节(待补)"
                         echo ""
-                        echo "$messages_all" | jq -r '.[] | if .role == "user" then "用户: \(.content)" elif .role == "assistant" then "助手: \(.content)" else "\(.role): \(.content)" end'
+                        render_raw_detail
                     fi
                     echo ""
                 } >>"$fpath"
-                merge_checkpoint_bump_from_messages "$messages_all"
-                date +%s >"$CONFIG_DIR/.last_archive_ts"
-                local per_key_json sk_u uu
-                per_key_json="{}"
-                for sk_u in "${MERGE_PAIR_KEYS[@]}"; do
-                    uu=$(canonical_uint "${SESSION_USAGE_BY_KEY[$sk_u]:-0}" 0)
-                    per_key_json=$(jq -c --arg k "$sk_u" --argjson v "$uu" '. + {($k): $v}' <<<"$per_key_json")
-                done
-                jq -n --arg sk "$SESSION_MERGE_LABEL" \
-                    --argjson u "$(canonical_uint "$USAGE_TOKENS" 0)" \
-                    --argjson ts "$(date +%s)" \
-                    --argjson pk "$per_key_json" \
-                    '{session_key:$sk, usage_tokens:$u, ts:$ts, per_key_usage:$pk}' >"$CONFIG_DIR/.last_archive_meta.json"
+                finalize_archive_bookkeeping
                 log "[INFO] 已写入 $fpath（待补归档）+ sidecar $sidecar_path；已更新合并检查点 $MERGE_CHECKPOINT_FILE"
             fi
         else
@@ -855,34 +905,29 @@ do_archive() {
             local _sentinel_hit _sentinel_lc
             _sentinel_hit=0
             if cloud_summarizer_enabled; then
-                # ===== Fix 1b: 哨兵后闸 =====
-                # 主判据：cloud_block 不含任何 [关键 tag；辅判据：含哨兵短语。
-                # #5: 仅对【短】块判定为空时段——真空时段哨兵句很短(几十字)，而真在
-                # 讨论"心跳"的实质摘要是几百字；长块即便漏 tag 且含"心跳"也不丢，避免
-                # 误删真内容(此路径丢块即永久丢失，无 sidecar 兜底)。
-                if [[ "$cloud_block" != *'[关键'* ]] && [ "${#cloud_block}" -lt 280 ]; then
+                # #7+#8: merge every structured-facts ```json fence into ONE
+                # validated/deduped fence (chunk mode emits one per chunk) and strip
+                # malformed JSON before it ever reaches the memory file.
+                cloud_block=$(consolidate_structured_facts "$cloud_block")
+                # ===== Fix 1b: 哨兵后闸 (#10) =====
+                # 主信号：摘要器为空时段输出的稳定机器 token [空时段]（对 prompt 措辞重写
+                # 鲁棒）；回退：完全没有任一知识 tag（9 种，不只 [关键) + 块短(#5) + 哨兵短语。
+                if [[ "$cloud_block" == *'[空时段]'* ]]; then
+                    _sentinel_hit=1
+                elif ! grep -qE '^\[(关键|已完成|待办|创意)' <<<"$cloud_block" \
+                     && [ "${#cloud_block}" -lt 280 ]; then
                     _sentinel_lc=$(echo "$cloud_block" | tr '[:upper:]' '[:lower:]')
                     if [[ "$_sentinel_lc" == *'无实质内容'* ]] || \
                        [[ "$_sentinel_lc" == *'仅系统'* ]] || \
                        [[ "$_sentinel_lc" == *'心跳'* ]]; then
                         _sentinel_hit=1
-                        log "[INFO] Fix1b 哨兵后闸：云端摘要无 [关键 tag 且命中哨兵短语，不写块，推进 checkpoint + compact"
-                        merge_checkpoint_bump_from_messages "$messages_all"
-                        date +%s >"$CONFIG_DIR/.last_archive_ts"
-                        local per_key_json sk_u uu
-                        per_key_json="{}"
-                        for sk_u in "${MERGE_PAIR_KEYS[@]}"; do
-                            uu=$(canonical_uint "${SESSION_USAGE_BY_KEY[$sk_u]:-0}" 0)
-                            per_key_json=$(jq -c --arg k "$sk_u" --argjson v "$uu" '. + {($k): $v}' <<<"$per_key_json")
-                        done
-                        jq -n --arg sk "$SESSION_MERGE_LABEL" \
-                            --argjson u "$(canonical_uint "$USAGE_TOKENS" 0)" \
-                            --argjson ts "$(date +%s)" \
-                            --argjson pk "$per_key_json" \
-                            '{session_key:$sk, usage_tokens:$u, ts:$ts, per_key_usage:$pk}' >"$CONFIG_DIR/.last_archive_meta.json"
-                        run_compact
-                        exit 0
                     fi
+                fi
+                if [ "$_sentinel_hit" = "1" ]; then
+                    log "[INFO] Fix1b 哨兵后闸：判为空时段(无知识 tag)，不写块，推进 checkpoint + compact"
+                    finalize_archive_bookkeeping
+                    run_compact
+                    exit 0
                 fi
             fi
 
@@ -916,7 +961,7 @@ do_archive() {
                             echo ""
                             echo "### 原始细节"
                             echo ""
-                            echo "$messages_all" | jq -r '.[] | if .role == "user" then "用户: \(.content)" elif .role == "assistant" then "助手: \(.content)" else "\(.role): \(.content)" end'
+                            render_raw_detail
                             echo ""
                             echo "### 摘要"
                             echo ""
@@ -952,25 +997,13 @@ do_archive() {
                         else
                             echo "### 原始细节"
                             echo ""
-                            echo "$messages_all" | jq -r '.[] | if .role == "user" then "用户: \(.content)" elif .role == "assistant" then "助手: \(.content)" else "\(.role): \(.content)" end'
+                            render_raw_detail
                         fi
                         echo ""
                     } >>"$fpath"
                     log "[INFO] cloud_summarizer 禁用，已写入 $fpath（最终原始细节，无待补/无 sidecar）"
                 fi
-                merge_checkpoint_bump_from_messages "$messages_all"
-                date +%s >"$CONFIG_DIR/.last_archive_ts"
-                local per_key_json sk_u uu
-                per_key_json="{}"
-                for sk_u in "${MERGE_PAIR_KEYS[@]}"; do
-                    uu=$(canonical_uint "${SESSION_USAGE_BY_KEY[$sk_u]:-0}" 0)
-                    per_key_json=$(jq -c --arg k "$sk_u" --argjson v "$uu" '. + {($k): $v}' <<<"$per_key_json")
-                done
-                jq -n --arg sk "$SESSION_MERGE_LABEL" \
-                    --argjson u "$(canonical_uint "$USAGE_TOKENS" 0)" \
-                    --argjson ts "$(date +%s)" \
-                    --argjson pk "$per_key_json" \
-                    '{session_key:$sk, usage_tokens:$u, ts:$ts, per_key_usage:$pk}' >"$CONFIG_DIR/.last_archive_meta.json"
+                finalize_archive_bookkeeping
                 log "[INFO] 已写入 $fpath；已更新合并检查点 $MERGE_CHECKPOINT_FILE"
             fi
         fi

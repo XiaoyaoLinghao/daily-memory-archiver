@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Daily Memory Archiver v1.6.1** - An OpenClaw Skill for archiving conversation sessions:
+**Daily Memory Archiver v1.6.2** - An OpenClaw Skill for archiving conversation sessions:
 - Multi-session merging by timestamp with checkpoint-based incremental processing
 - Local keyword extraction and optional cloud LLM summarization
 - Per-session-key usage threshold triggering with selective `sessions.compact`
@@ -30,7 +30,7 @@ bash scripts/test-wave10.sh             # Pure-noise skip + silent-day marker + 
 ```
 Most tests source library functions (e.g. `conversation-noise.sh`) or grep `archive-engine.sh` for required logic; the integration ones (e.g. `test-regression.sh`) run `do_archive` in an isolated `mktemp -d` MEMORY_DIR. All print `OK/FAIL` lines and exit non-zero on failure.
 
-`bash tests/test-v161-fixes.sh` covers the v1.6.1 code-review fixes (reconcile robustness, disabled-cloud, sentinel length-guard, lexicon-on-reconcile).
+`bash tests/test-v161-fixes.sh` covers the v1.6.2 code-review fixes (reconcile robustness, disabled-cloud, sentinel length-guard, lexicon-on-reconcile).
 
 ### Health & Migration
 ```bash
