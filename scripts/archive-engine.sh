@@ -450,8 +450,23 @@ run_compact_one() {
 }
 
 # ===== Fix 3B: reconcile — 扫 .pending sidecar，调云端摘要替换(待补)块 =====
+# W2/B: best-effort fetch the KW project lexicon and export it so the cloud
+# summarizer emits canonical project names in ### 结构化事实. Opt-in via
+# DAILY_MEMORY_LEXICON_CMD; idempotent (skips if already set). Called by BOTH
+# do_archive and do_reconcile so live + backfilled facts use the same names (#6).
+inject_lexicon() {
+    local _lex
+    [ -n "${DAILY_MEMORY_LEXICON_CMD:-}" ] && [ -z "${DAILY_MEMORY_LEXICON:-}" ] || return 0
+    _lex=$(timeout 15 ${DAILY_MEMORY_LEXICON_CMD} 2>/dev/null || true)
+    if [ -n "$_lex" ]; then
+        export DAILY_MEMORY_LEXICON="$_lex"
+        log "[INFO] W2: 已注入项目词表到云端摘要器（${#_lex} 字节）"
+    fi
+}
+
 do_reconcile() {
     load_config || exit 1
+    inject_lexicon   # #6: standalone `reconcile` must also get canonical names
     local pending_dir="$MEMORY_DIR/.pending"
     [ -d "$pending_dir" ] || { log "[INFO] reconcile: 无 .pending 目录，跳过"; return 0; }
     local sidecars
@@ -476,6 +491,13 @@ do_reconcile() {
     local sc day hhmm md_file tmp_plain cloud_out
     while IFS= read -r sc; do
         [ -f "$sc" ] || continue
+        # #1: a corrupt/truncated sidecar (e.g. a crash mid-write) would make the
+        # jq pipeline below fail and, under set -euo pipefail, abort the whole run
+        # — wedging all archiving. Validate first and skip bad ones.
+        if ! jq -e 'type=="array"' "$sc" >/dev/null 2>&1; then
+            log "[WARN] reconcile: sidecar $sc 非法/截断 JSON，跳过（保留待人工检查）"
+            continue
+        fi
         local bn
         bn=$(basename "$sc" .json)
         day="${bn%%_*}"
@@ -490,7 +512,7 @@ do_reconcile() {
         # 前置校验：检查 ## HH:MM 块内是否含 ### 原始细节(待补)
         if ! awk -v h="## ${hhmm}" '
             $0 == h { inb=1; next }
-            inb && /^## / { inb=0 }
+            inb && /^## [0-9][0-9]:[0-9][0-9]/ { inb=0 }
             inb && /^### 原始细节\(待补\)/ { found=1 }
             END { exit !found }
         ' "$md_file"; then
@@ -518,14 +540,16 @@ do_reconcile() {
                     in_block=1
                     wrote=0
                 elif [ "$in_block" = "1" ]; then
-                    if [[ "$line" == "## "* ]]; then
-                        # 遇到下一个时段，如果还没写摘要（前置校验已过滤孤儿，此处为防御）
+                    if [[ "$line" =~ ^##\ [0-9][0-9]:[0-9][0-9] ]]; then
+                        # #3: only a real `## HH:MM` slot header ends the block — a
+                        # body line that merely starts with "## " (user-pasted heading)
+                        # is NOT a boundary, so it stays inside the (待补) block.
                         if [ "$wrote" = "0" ]; then
                             log "[WARN] reconcile: ${day}_${hhmm} 未找到待补标记，跳过摘要追加（可能已补档）"
                         fi
                         echo "$line" >>"$tmp_md"
                         in_block=0
-                    elif [[ "$line" == "### 原始细节(待补)" ]]; then
+                    elif [[ "$line" == "### 原始细节(待补)"* ]]; then
                         # 找到待补标记，输出摘要替换
                         echo "### 摘要" >>"$tmp_md"
                         echo "" >>"$tmp_md"
@@ -558,19 +582,10 @@ do_reconcile() {
 
 do_archive() {
     load_config || exit 1
-    # W2/B: best-effort fetch the KW project lexicon and export it so the cloud
-    # summarizer outputs canonical project names in ### 结构化事实. Opt-in via
-    # DAILY_MEMORY_LEXICON_CMD (e.g. "python3 -m knowledge_weaver.registry --lexicon");
-    # disabled when unset, so default behaviour is unchanged.
-    if [ -n "${DAILY_MEMORY_LEXICON_CMD:-}" ] && [ -z "${DAILY_MEMORY_LEXICON:-}" ]; then
-        _lex=$(timeout 15 ${DAILY_MEMORY_LEXICON_CMD} 2>/dev/null || true)
-        if [ -n "$_lex" ]; then
-            export DAILY_MEMORY_LEXICON="$_lex"
-            log "[INFO] W2: 已注入项目词表到云端摘要器（${#_lex} 字节）"
-        fi
-    fi
-    # Fix 3B: 自动扫一次 .pending → 补档
-    do_reconcile
+    inject_lexicon
+    # Fix 3B: 自动扫一次 .pending → 补档。#1: never let a reconcile error (e.g. a
+    # corrupt sidecar) abort the actual archive — degrade to a warning.
+    do_reconcile || log "[WARN] reconcile 跳过(异常),不影响本次归档"
     finalize_empty_previous_day
     run_log_maintenance
     resolve_session_key
@@ -841,8 +856,11 @@ do_archive() {
             _sentinel_hit=0
             if cloud_summarizer_enabled; then
                 # ===== Fix 1b: 哨兵后闸 =====
-                # 主判据：cloud_block 不含任何 [关键 tag；辅判据：含哨兵短语
-                if [[ "$cloud_block" != *'[关键'* ]]; then
+                # 主判据：cloud_block 不含任何 [关键 tag；辅判据：含哨兵短语。
+                # #5: 仅对【短】块判定为空时段——真空时段哨兵句很短(几十字)，而真在
+                # 讨论"心跳"的实质摘要是几百字；长块即便漏 tag 且含"心跳"也不丢，避免
+                # 误删真内容(此路径丢块即永久丢失，无 sidecar 兜底)。
+                if [[ "$cloud_block" != *'[关键'* ]] && [ "${#cloud_block}" -lt 280 ]; then
                     _sentinel_lc=$(echo "$cloud_block" | tr '[:upper:]' '[:lower:]')
                     if [[ "$_sentinel_lc" == *'无实质内容'* ]] || \
                        [[ "$_sentinel_lc" == *'仅系统'* ]] || \
@@ -918,28 +936,27 @@ do_archive() {
                         } >>"$fpath"
                     fi
                 else
-                    # ===== Fix 3A: cloud_summarizer 禁用 → 暂存原始细节(待补) =====
-                    mkdir -p "$MEMORY_DIR/.pending"
-                    local sidecar_path
-                    sidecar_path="$MEMORY_DIR/.pending/${day}_${ts_hhmm}.json"
-                    echo "$messages_all" >"$sidecar_path"
+                    # ===== cloud_summarizer 禁用 → 写【最终】原始细节 =====
+                    # #4: when cloud is disabled (not a transient failure), no summary
+                    # is ever coming and reconcile self-skips while disabled — so write
+                    # a FINAL `### 原始细节` (no 待补 promise) and DO NOT drop a sidecar
+                    # that would only accumulate forever in .pending/.
                     {
                         echo ""
                         echo "## ${ts_hhmm}"
                         echo ""
                         if [ "$RAW_DETAIL" = "off" ]; then
-                            echo "### 原始细节(待补)"
+                            echo "### 原始细节"
                             echo ""
-                            echo "- *（raw_detail=off：原始细节仅保留在 sidecar 中）*"
+                            echo "- *（raw_detail=off：cloud 禁用，未保留逐字原始细节）*"
                         else
-                            echo "### 原始细节(待补)"
+                            echo "### 原始细节"
                             echo ""
                             echo "$messages_all" | jq -r '.[] | if .role == "user" then "用户: \(.content)" elif .role == "assistant" then "助手: \(.content)" else "\(.role): \(.content)" end'
                         fi
                         echo ""
                     } >>"$fpath"
-                    echo "$messages_all" >"$sidecar_path"
-                    log "[INFO] cloud_summarizer 禁用，已写入 $fpath（待补归档）+ sidecar $sidecar_path"
+                    log "[INFO] cloud_summarizer 禁用，已写入 $fpath（最终原始细节，无待补/无 sidecar）"
                 fi
                 merge_checkpoint_bump_from_messages "$messages_all"
                 date +%s >"$CONFIG_DIR/.last_archive_ts"

@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 # 验证 archive-engine.sh 写出的 memory 文件符合 KW SPEC v1.1
 # 用法：bash scripts/test-output-format.sh [path/to/memory.md]
-#      不传参数时，从 stdin 读取
+#      无路径参数时：从 stdin 读取管道输入；无管道/输入为空时回退到内置样例。
 set -euo pipefail
 
 if [ $# -ge 1 ] && [ -f "$1" ]; then
     output=$(cat "$1")
 else
-    # 模拟一段 archive-engine.sh 写入产生的 markdown 段
-    output=$(cat <<'EOF'
+    # 优先读取管道输入（stdin 非终端时）；为空则回退到内置样例段，
+    # 保证 self-check / wave10 等无参调用在 cron/重定向(/dev/null) 下仍走样例。
+    output=""
+    if [ ! -t 0 ]; then
+        output=$(cat)
+    fi
+    if [ -z "$output" ]; then
+        # 模拟一段 archive-engine.sh 写入产生的 markdown 段
+        output=$(cat <<'EOF'
 
 ## 14:30
 
@@ -25,6 +32,7 @@ else
 
 EOF
 )
+    fi
 fi
 
 fail=0

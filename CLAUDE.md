@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Daily Memory Archiver v1.6.0** - An OpenClaw Skill for archiving conversation sessions:
+**Daily Memory Archiver v1.6.1** - An OpenClaw Skill for archiving conversation sessions:
 - Multi-session merging by timestamp with checkpoint-based incremental processing
 - Local keyword extraction and optional cloud LLM summarization
 - Per-session-key usage threshold triggering with selective `sessions.compact`
@@ -16,6 +16,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 bash scripts/self-check.sh          # Check dependencies and syntax
 bash -n scripts/<script-name>.sh    # Syntax check individual script
+```
+
+### Tests
+There is no test runner, Makefile, or CI — each test is a standalone bash script run directly. Run the one(s) relevant to your change:
+```bash
+bash tests/test-dma-fix-plan.sh         # Noise-filter / fix-plan unit assertions
+bash tests/test-regression.sh           # Real-data regression: runs do_archive in an isolated MEMORY_DIR
+bash scripts/test-extractor-titles.sh   # local-extractor category titles match KW SPEC §4
+bash scripts/test-output-format.sh [memory.md]  # Output conforms to KW SPEC v1.1 (validates piped stdin, or a built-in sample if neither path arg nor pipe)
+bash scripts/test-fail-guard.sh         # Cloud recoverable-failure must NOT advance the checkpoint
+bash scripts/test-wave10.sh             # Pure-noise skip + silent-day marker + regression
+```
+Most tests source library functions (e.g. `conversation-noise.sh`) or grep `archive-engine.sh` for required logic; the integration ones (e.g. `test-regression.sh`) run `do_archive` in an isolated `mktemp -d` MEMORY_DIR. All print `OK/FAIL` lines and exit non-zero on failure.
+
+`bash tests/test-v161-fixes.sh` covers the v1.6.1 code-review fixes (reconcile robustness, disabled-cloud, sentinel length-guard, lexicon-on-reconcile).
+
+### Health & Migration
+```bash
+bash scripts/health-check.sh [--days N]    # Scan recent memory/ for missed-archive risk; alerts on anomalies
+bash scripts/migrate-memory-files.sh [memory_dir]  # One-shot migrate old output to KW SPEC format (backs up first)
 ```
 
 ### Main Operations
@@ -111,6 +131,7 @@ Critical ones to know:
 - `DAILY_MEMORY_PERIODIC_ARCHIVE_MINUTES` - Override periodic archive interval
 - `SKIP_SESSION_COMPACT=1` / `OPENCLAW_SKIP_COMPACT=1` - Bypass compact operation
 - `OPENCLAW_HOME` - Defaults to `~/.openclaw`
+- `DAILY_MEMORY_LEXICON_CMD` / `DAILY_MEMORY_LEXICON` - W2 opt-in: a command (or literal text) supplying the KW project lexicon (canonical names) injected into the cloud summarizer's system prompt so `### 结构化事实` emits canonical `name`s. `_CMD` is run with `timeout 15`; if `DAILY_MEMORY_LEXICON` is already set the command is skipped. These are env-only — **not** `config.yaml` keys (hence `config_version` stays `8`).
 
 ## Important Development Notes
 
@@ -121,17 +142,18 @@ Critical ones to know:
    - `SKILL.md` - User-facing (installation, cron, pairing, migration)
    - `README.md` - Maintainer-facing (architecture, config keys, checklist)
 5. **Lock file**: `archive` uses `flock -n` on `config/.archive.lock` for mutual exclusion; without `flock` available it proceeds without locking
-6. **Memory output format**: Files in `memory/YYYY-MM-DD.md` follow KW SPEC v1.1: YAML frontmatter + `## HH:MM` time slots + `### 原始细节` (local-extractor 8-category output) + `### 摘要` (cloud-summarizer narrative + `[关键X]` tags). KW indexes only `### 摘要` for entities; `### 原始细节` is preserved for OpenClaw memory_search verbatim recall.
+6. **Memory output format**: Files in `memory/YYYY-MM-DD.md` follow KW SPEC v1.1: YAML frontmatter + `## HH:MM` time slots + `### 原始细节` (local-extractor 8-category output) + `### 摘要` (cloud-summarizer narrative + `[关键X]` tags) + optional `### 结构化事实` (W2: a ```json``` array of facts for direct Knowledge Weaver ingestion, replacing regex extraction — emitted only for slots with substantive knowledge, omitted for heartbeat/ops-only slots). KW indexes only `### 摘要` for entities; `### 原始细节` is preserved for OpenClaw memory_search verbatim recall.
 7. **Noise filtering**: `conversation-noise.sh` is context-aware — short heartbeat/tool lines are filtered, but longer messages or those containing discussion keywords are preserved. Custom patterns loaded from `config.yaml` `noise_filter.custom_patterns`
 8. **Cloud summarizer**: Uses temp files for payload/response to avoid `ARG_MAX` overflow and `curl: (23)` pipe-write failures
 
 ## Code Change Checklist
 
 When modifying code:
-1. Run `bash scripts/self-check.sh` or `bash -n <script>` for syntax
+1. Run `bash scripts/self-check.sh` or `bash -n <script>` for syntax; run the relevant `tests/`/`scripts/test-*.sh` (see Tests above)
 2. New `config.yaml` keys need: `load_config` reading + `save_config_yaml` defaults + documentation update
 3. Sync both `SKILL.md` and `README.md` for semantic changes
 4. Verify secrets and runtime state files are in `.gitignore`
+5. **Versioning** (see `VERSIONING.md`): three independent axes — never conflate. `skill_version` (SemVer; source of truth = `SKILL.md` frontmatter, README/prose must match), `config_version` (integer; source = `config/config.yaml`; bump **only** on schema change, never for env-var-only features), `spec_version` (the `KW_MEMORY_FILE_SPEC` the output conforms to). On release: bump the axis in `SKILL.md` frontmatter, sync the mirrors, then `git tag`.
 
 ## Pairing for Compact
 
