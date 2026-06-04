@@ -111,7 +111,7 @@ save_config_yaml() {
         echo "output:"
         echo "  memory_dir: \"${MEMORY_DIR:-~/.openclaw/workspace/memory}\""
         echo ""
-        echo "skill_version: \"1.6.1\""
+        echo "skill_version: \"1.6.2\""
         echo "config_version: \"8\""
     } > "$CONFIG_FILE"
     chmod 644 "$CONFIG_FILE"

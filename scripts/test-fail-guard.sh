@@ -12,32 +12,40 @@ grep -q 'cloud_recoverable_fail' "$SCRIPT_DIR/archive-engine.sh" || { echo "FAIL
 grep -q '.cloud_retry_count' "$SCRIPT_DIR/archive-engine.sh" || { echo "FAIL: no retry count"; exit 1; }
 
 # 3. 验证 checkpoint bump 被条件包裹（不再无条件执行）
-#    merge_checkpoint_bump 调用必须在 cloud_recoverable_fail 保护的分支内
+#    自 v1.6.2 起 checkpoint 推进集中在 finalize_archive_bookkeeping()；安全不变量改为：
+#    该函数的每个【调用点】都必须在 cloud_recoverable_fail 守卫下游；函数体内的直接 bump
+#    只经这些守卫过的调用到达；唯一的直接 bump 是 Wave10 纯噪声分支(slot_has_substance)。
 python3 - "$SCRIPT_DIR/archive-engine.sh" <<'PY'
 import sys, re
 src = open(sys.argv[1]).read()
-# 找所有 merge_checkpoint_bump_from_messages 的调用位置（跳过函数定义和 Wave 10 纯噪声分支）
+GUARD = 'cloud_recoverable_fail'
+fb_def = src.find('finalize_archive_bookkeeping() {')
+
+# (a) 每个 finalize_archive_bookkeeping 调用点都在守卫下游
 ok = 0
-pattern = re.compile(r'merge_checkpoint_bump_from_messages')
-definition_start = src.find('merge_checkpoint_bump_from_messages()')
-for m in pattern.finditer(src):
+for m in re.finditer(r'finalize_archive_bookkeeping', src):
     idx = m.start()
-    # 跳过函数定义
-    if definition_start > 0 and abs(idx - definition_start) < 10:
-        continue
-    # Wave 10 纯噪声分支：skip-substance 路径内的 checkpoint bump 不归 Wave 8 守护
-    before = src[max(0, idx - 300):idx]
-    if 'slot_has_substance' in src[max(0, idx - 2000):idx]:
-        ok += 1  # Wave 10 branch — counted but not checked for cloud_recoverable_fail
-        continue
-    before_wide = src[max(0, idx - 16000):idx]
-    if 'cloud_recoverable_fail' in before_wide:
-        ok += 1
-    else:
-        print(f'FAIL: merge_checkpoint_bump call at pos {idx} not guarded')
+    if fb_def >= 0 and abs(idx - fb_def) < 5:
+        continue  # 函数定义本身
+    ok += 1
+    if GUARD not in src[max(0, idx - 16000):idx]:
+        print(f'FAIL: finalize_archive_bookkeeping call at pos {idx} not guarded by {GUARD}')
         sys.exit(1)
-assert ok >= 3, f"Expected >= 3 guarded merge_checkpoint_bump calls, found {ok}"
-print(f"OK: checkpoint bump guarded ({ok} call sites)")
+assert ok >= 3, f"Expected >= 3 guarded finalize_archive_bookkeeping calls, found {ok}"
+
+# (b) 唯一允许的直接 merge_checkpoint_bump：函数定义、helper 函数体、Wave10 噪声分支
+mb_def = src.find('merge_checkpoint_bump_from_messages()')
+for m in re.finditer(r'merge_checkpoint_bump_from_messages', src):
+    idx = m.start()
+    if mb_def >= 0 and abs(idx - mb_def) < 10:
+        continue                                   # 函数定义
+    if fb_def >= 0 and fb_def < idx < fb_def + 500:
+        continue                                   # finalize_archive_bookkeeping 函数体内
+    if 'slot_has_substance' in src[max(0, idx - 2000):idx]:
+        continue                                   # Wave10 纯噪声分支
+    print(f'FAIL: unguarded direct checkpoint bump at pos {idx}')
+    sys.exit(1)
+print(f"OK: checkpoint bump guarded ({ok} finalize 调用点 + Wave10 + helper 体)")
 PY
 
 # 4. 验证 cloud_recoverable_fail=1 出现 ≥ 4 次（4 个可恢复失败分支）
