@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Daily Memory Archiver v1.5.0** - An OpenClaw Skill for archiving conversation sessions:
+**Daily Memory Archiver v1.6.0** - An OpenClaw Skill for archiving conversation sessions:
 - Multi-session merging by timestamp with checkpoint-based incremental processing
 - Local keyword extraction and optional cloud LLM summarization
 - Per-session-key usage threshold triggering with selective `sessions.compact`
