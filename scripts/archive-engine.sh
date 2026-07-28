@@ -784,18 +784,29 @@ do_archive() {
         # Fix 2: normal path no longer needs LOCAL_EXTRACTOR;
         # fallback (Fix 3) generates raw detail directly from messages_all
         insights=""
-        if cloud_summarizer_enabled && [ -f "$CONFIG_DIR/credentials.enc" ]; then
-            local tmp_plain api_url api_tok model_id cloud_out full_chunks used_chunks chunk_start_ci cidx start chunk_json clen cend sect
+        if cloud_summarizer_enabled; then
+            local tmp_plain api_url api_tok model_id cloud_out full_chunks used_chunks chunk_start_ci cidx start chunk_json clen cend sect cred_src
             tmp_plain=$(mktemp)
             chmod 600 "$tmp_plain"
-            if API_JSON=$("$GET_CREDS" 2>>"$LOG_FILE"); then
-                api_url=$(echo "$API_JSON" | jq -r .api_url)
-                api_tok=$(echo "$API_JSON" | jq -r .api_token)
-                model_id=$(echo "$API_JSON" | jq -r .model)
-                if [ -z "$api_url" ] || [ "$api_url" = "null" ] || [ -z "$api_tok" ] || [ "$api_tok" = "null" ] || [ -z "$model_id" ] || [ "$model_id" = "null" ]; then
-                    cloud_block="- *DMA-ERR: incomplete credentials (use save-json)*"
-                    cloud_recoverable_fail=1
-                elif [ "$CHUNK_CLOUD_SUMMARY" = "1" ] && [ "$total_new" -gt "$MESSAGES_TO_ANALYZE" ]; then
+            api_url=""; api_tok=""; model_id=""; cred_src=""
+            # 优先从环境变量读取（方便集中管理 API key）
+            if [ -n "${DAILY_MEMORY_API_TOKEN:-}" ] && [ -n "${DAILY_MEMORY_API_URL:-}" ] && [ -n "${DAILY_MEMORY_MODEL:-}" ]; then
+                api_url="$DAILY_MEMORY_API_URL"
+                api_tok="$DAILY_MEMORY_API_TOKEN"
+                model_id="$DAILY_MEMORY_MODEL"
+                cred_src="env"
+            # 回退到加密凭据文件
+            elif [ -f "$CONFIG_DIR/credentials.enc" ]; then
+                if API_JSON=$("$GET_CREDS" 2>>"$LOG_FILE"); then
+                    api_url=$(echo "$API_JSON" | jq -r .api_url)
+                    api_tok=$(echo "$API_JSON" | jq -r .api_token)
+                    model_id=$(echo "$API_JSON" | jq -r .model)
+                    cred_src="enc"
+                fi
+            fi
+            if [ -n "$api_url" ] && [ "$api_url" != "null" ] && [ -n "$api_tok" ] && [ "$api_tok" != "null" ] && [ -n "$model_id" ] && [ "$model_id" != "null" ]; then
+                log "[INFO] cloud_summarizer 凭据来源: ${cred_src}"
+                if [ "$CHUNK_CLOUD_SUMMARY" = "1" ] && [ "$total_new" -gt "$MESSAGES_TO_ANALYZE" ]; then
                     full_chunks=$(( (total_new + MESSAGES_TO_ANALYZE - 1) / MESSAGES_TO_ANALYZE ))
                     chunk_start_ci=0
                     used_chunks=$full_chunks
@@ -837,12 +848,16 @@ do_archive() {
                     fi
                 fi
             else
-                cloud_block="- *DMA-ERR: get-cloud-creds failed (check .master_key & credentials.enc)*"
+                if [ "$cred_src" = "env" ]; then
+                    cloud_block="- *DMA-ERR: env vars DAILY_MEMORY_API_TOKEN/URL/MODEL incomplete*"
+                elif [ -f "$CONFIG_DIR/credentials.enc" ]; then
+                    cloud_block="- *DMA-ERR: get-cloud-creds failed (check .master_key & credentials.enc)*"
+                else
+                    cloud_block="- *DMA-ERR: no credentials (set env vars or config/credentials.enc)*"
+                fi
                 cloud_recoverable_fail=1
             fi
             rm -f "$tmp_plain"
-        elif cloud_summarizer_enabled; then
-            cloud_block="- *DMA-ERR: no credentials.enc*"
         else
             cloud_block="- *DMA-ERR: cloud summarizer disabled*"
         fi
