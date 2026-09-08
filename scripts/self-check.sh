@@ -7,6 +7,12 @@ pass() { echo "OK  : $*"; }
 
 command -v bash >/dev/null || fail bash
 command -v jq >/dev/null || fail jq
+if command -v python3 >/dev/null; then
+    python3 -c 'import sys, sqlite3; assert sys.version_info >= (3, 9)' || fail "Python 3.9+ with sqlite3"
+else
+    fail python3
+fi
+[ -f "$ROOT/scripts/session-store.py" ] || fail session-store.py
 command -v openssl >/dev/null || fail openssl
 command -v curl >/dev/null || fail curl
 

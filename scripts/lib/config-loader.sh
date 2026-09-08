@@ -15,7 +15,29 @@ yaml_scalar() {
     # D3: strip an INLINE comment only when '#' is preceded by whitespace — a '#'
     # inside a value (path '/srv/a#b', token 'sk-A#9') has no leading space and is
     # KEPT. (Strip the comment BEFORE quotes so a quoted value's '#' survives.)
-    grep -E "^[[:space:]]*${key}:" "$file" 2>/dev/null | head -1 | \
+    # The shipped schema uses a nested cloud_summarizer.enabled value. A plain
+    # grep for the dotted name silently ignored enabled:false and enabled cloud
+    # calls. Retain the historical dotted spelling as an explicit fallback.
+    if [ "$key" = 'cloud_summarizer.enabled' ]; then
+        awk '
+            /^[[:space:]]*cloud_summarizer:[[:space:]]*(#.*)?$/ {
+                match($0, /[^[:space:]]/); parent = RSTART; inside = 1; next
+            }
+            inside && /^[[:space:]]*($|#)/ { next }
+            inside {
+                match($0, /[^[:space:]]/)
+                if (RSTART <= parent) { inside = 0 }
+                else if ($0 ~ /^[[:space:]]*enabled:/) {
+                    sub(/^[[:space:]]*enabled:/, "cloud_summarizer.enabled:")
+                    print; found = 1; exit
+                }
+            }
+            /^[[:space:]]*cloud_summarizer[.]enabled:/ { fallback = $0 }
+            END { if (!found && fallback != "") print fallback }
+        ' "$file"
+    else
+        grep -E "^[[:space:]]*${key}:" "$file" 2>/dev/null
+    fi | head -1 | \
         sed -E "s/^[[:space:]]*${key}:[[:space:]]*//" | \
         sed -E 's/[[:space:]]+#.*$//;s/^["'\'']//;s/["'\'']$//;s/[[:space:]]*$//'
 }

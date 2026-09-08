@@ -43,18 +43,19 @@ for m in re.finditer(r'merge_checkpoint_bump_from_messages', src):
         continue                                   # finalize_archive_bookkeeping 函数体内
     if 'slot_has_substance' in src[max(0, idx - 2000):idx]:
         continue                                   # Wave10 纯噪声分支
+    if 'msg_count:-0' in src[max(0, idx - 600):idx] and "'[]'" in src[idx:idx + 50]:
+        continue                                   # Empty snapshot: bootstrap identities only
     print(f'FAIL: unguarded direct checkpoint bump at pos {idx}')
     sys.exit(1)
 print(f"OK: checkpoint bump guarded ({ok} finalize 调用点 + Wave10 + helper 体)")
 PY
 
-# 4. 验证 cloud_recoverable_fail=1 出现 ≥ 4 次（4 个可恢复失败分支）
-count=$(grep -c 'cloud_recoverable_fail=1' "$SCRIPT_DIR/archive-engine.sh" || echo 0)
-if [ "$count" -ge 4 ]; then
-    echo "OK: cloud_recoverable_fail=1 found ${count} times"
-else
-    echo "FAIL: cloud_recoverable_fail=1 only ${count} times (expected >= 4)"
-    exit 1
+# 4. Exercise failure/defer behavior through the real archive entry point.
+# Counting assignments broke when equivalent error branches were consolidated.
+# Wave10 composes only the structural checks; self-check already runs the
+# full behavior suite here once, so do not run it twice through nested tests.
+if [ "${1:-}" != "--structural-only" ]; then
+    bash "$SCRIPT_DIR/../tests/test-session-store-integration.sh"
 fi
 
 # 5. 验证 run_compact 被 cloud_recoverable_fail 保护

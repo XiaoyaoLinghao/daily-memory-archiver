@@ -8,10 +8,11 @@ OpenClaw 会话归档 Skill：多 session 按时间合并、检查点增量、�
 
 ## 版本与兼容
 
-- **当前：1.6.3**（`config_version: "8"`，实现 `KW_MEMORY_FILE_SPEC` v1.1）：在 1.5.0 基础上新增 W2 结构化事实交接（`### 结构化事实` JSON）+ 项目词表注入。
+- **当前候选：1.7.0**（`config_version: "8"`，实现 `KW_MEMORY_FILE_SPEC` v1.1）：新增 SQLite 原生读取与跨存储增量检查点；保留结构化事实交接与项目词表注入。
 - 实现与 **SKILL.md** 中 `skill_version` / `config.yaml` 中 `config_version` 应对齐；以脚本行为为准。
 - config schema 未变（lexicon 为 env 变量，非 config.yaml 键），故 `config_version` 保持 `8`。
-- Shell：**bash 4+**（使用关联数组 `declare -A`）。
+- Shell：**bash 4+**（使用关联数组 `declare -A`），Python **3.9+**（含标准库 `sqlite3`）、jq。
+- 安装、迁移、离线路径与回退步骤见 **[SQLite 升级说明](docs/sqlite-upgrade.md)**。
 
 ## 仓库布局
 
@@ -22,8 +23,9 @@ OpenClaw 会话归档 Skill：多 session 按时间合并、检查点增量、�
 | `config/config.yaml` | 主配置（无密钥） |
 | `config/credentials.enc` | 云端 API 加密凭证（勿提交） |
 | `config/.master_key` | 解密用（勿提交） |
-| `config/.archive_merge_checkpoint.json` | 各 key 最后已归档消息时间戳（运行时生成，勿提交） |
+| `config/.archive_merge_checkpoint.json` | 各 key 已消费消息身份游标（兼容旧时间戳的首次升级）（运行时生成，勿提交） |
 | `bin/daily-memory-archiver` | CLI 包装：`init`、`archive`、`logs`、`check`、`status`、`creds` |
+| `scripts/session-store.py` | 统一 JSONL / 只读 SQLite 快照与增量消息读取 |
 | `scripts/archive-engine.sh` | 核心：`archive`、`log-maintenance` |
 | `scripts/config-manager.sh` | `init-defaults`、`save-json`、merge keys、`status`/`show` |
 | `scripts/get-cloud-creds.sh` | 解密并输出 JSON（api_url / api_token / model） |
@@ -37,10 +39,10 @@ OpenClaw 会话归档 Skill：多 session 按时间合并、检查点增量、�
 ## 主流程（`archive-engine.sh archive`）
 
 1. `load_config`：读 `config.yaml` + 环境变量覆盖。
-2. `run_log_maintenance`：天龄清理 → 按大小轮转（见下节）。
-3. 解析 `merge_jsonl_keys` / `DAILY_MEMORY_MERGE_KEYS`，读 `sessions.json` 与各 session jsonl。
+2. 解析 `merge_jsonl_keys` / `DAILY_MEMORY_MERGE_KEYS`，经统一读取模块取得 SQLite 或旧 JSONL 快照；发现或校验失败立即停止。
+3. 快照按消息身份去重、跨 key 排序；随后运行待补归档、空日标记和日志维护。
 4. 阈值 / hybrid / scheduled 与可选 **`periodic_archive_minutes`** 判断是否继续。
-5. `merged_jsonl_new_messages_json`：按检查点过滤后跨 key 按 `timestamp` 合并。
+5. 读取快照中的本批消息；无新增时可提交身份游标升级，不写 memory、不 compact。
 6. `min_new_messages`、空新增早退；**超阈值或定期间隔触发**时可放宽 `min_new`；冷却可跳过 memory 写入（定期间隔触发时不受冷却挡写入）。
 7. 本地提取、`cloud-summarizer`（可分块）、追加 `memory/YYYY-MM-DD.md`，更新检查点与 meta。
 8. `sessions.compact`（可选仅超限 key）。

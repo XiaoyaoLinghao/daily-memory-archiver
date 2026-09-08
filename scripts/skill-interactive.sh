@@ -35,24 +35,12 @@ case "${1:-help}" in
     # ------------------------------------------------------------------------
     list-sessions)
         agent_id="${2:-main}"
-        sessions_json="$OPENCLAW_HOME/agents/$agent_id/sessions/sessions.json"
-        if [ ! -f "$sessions_json" ]; then
-            jq -n --arg agent "$agent_id" '{error: ("sessions.json not found for agent: " + $agent)}'
+        sessions_json="${SESSIONS_JSON:-$OPENCLAW_HOME/agents/$agent_id/sessions/sessions.json}"
+        if ! python3 "$SCRIPT_DIR/session-store.py" list --agent "$agent_id" \
+            --home "$OPENCLAW_HOME" --legacy-store "$sessions_json"; then
+            jq -n --arg agent "$agent_id" '{error: "session store read failed", agent_id: $agent}'
             exit 1
         fi
-        jq --arg agent_id "$agent_id" '
-            to_entries | map({
-                key: .key,
-                sessionFile: (.value.sessionFile // ""),
-                inputTokens: (.value.inputTokens // 0),
-                totalTokens: (.value.totalTokens // 0),
-                totalTokensFresh: (.value.totalTokensFresh // false)
-            }) | {
-                agent_id: $agent_id,
-                count: length,
-                sessions: .
-            }
-        ' "$sessions_json"
         ;;
 
     # ------------------------------------------------------------------------
@@ -184,14 +172,17 @@ case "${1:-help}" in
         fi
         # 捕获输出但仍显示日志
         log_output=""
-        log_output=$(bash "$SCRIPT_DIR/archive-engine.sh" archive $force_arg 2>&1 || true)
+        archive_status=0
+        log_output=$(bash "$SCRIPT_DIR/archive-engine.sh" archive $force_arg 2>&1) || archive_status=$?
         echo "$log_output" >&2
         # 返回 JSON 结果
-        jq -n --arg force "${2:-normal}" --arg log "$log_output" '{
-            ok: true,
+        jq -n --arg force "${2:-normal}" --arg log "$log_output" --argjson status "$archive_status" '{
+            ok: ($status == 0),
+            exit_code: $status,
             mode: $force,
             log_preview: ($log | split("\n") | .[-5:] | join("\n"))
         }'
+        exit "$archive_status"
         ;;
 
     # ------------------------------------------------------------------------

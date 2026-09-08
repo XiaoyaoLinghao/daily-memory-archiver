@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Daily Memory Archiver：读 sessions.json → 合并 jsonl（可选）→ 提取 → 云端摘要 → memory → sessions.compact
+# Daily Memory Archiver：统一会话快照（SQLite / JSONL）→ 提取 → 摘要 → memory → checkpoint
 # 用法: archive-engine.sh archive [--force] [--session <key>] [--agent <id>]
 #       archive-engine.sh log-maintenance
 set -euo pipefail
@@ -184,105 +184,12 @@ load_merge_session_keys() {
     fi
 }
 
-# usage 计算已内联到 sessions.json 快照读取中，减少一次 jq 调用
-
-merge_checkpoint_get() {
-    local sk="$1"
-    [ -f "$MERGE_CHECKPOINT_FILE" ] || { echo ""; return; }
-    jq -r --arg sk "$sk" '.[$sk] // empty' "$MERGE_CHECKPOINT_FILE" 2>/dev/null || echo ""
-}
-
+# Publish only the cursor proposed by the snapshot that produced messages_all.
+# The caller invokes this after output or an intentional noise-only discard.
 merge_checkpoint_bump_from_messages() {
-    local mf_json="$1"
-    [ -f "$MERGE_CHECKPOINT_FILE" ] || echo '{}' >"$MERGE_CHECKPOINT_FILE"
-    local merged
-    merged=$(echo "$mf_json" | jq -c '
-        group_by(.sk)
-        | map({ (.[0].sk): (map(.ts) | max) })
-        | add
-        // {}
-    ')
-    jq -s --argjson m "$merged" '.[0] * $m' "$MERGE_CHECKPOINT_FILE" >"${MERGE_CHECKPOINT_FILE}.new" \
+    : "${SESSION_STORE_CHECKPOINT:?missing session snapshot checkpoint}"
+    printf '%s\n' "$SESSION_STORE_CHECKPOINT" >"${MERGE_CHECKPOINT_FILE}.new" \
         && mv "${MERGE_CHECKPOINT_FILE}.new" "$MERGE_CHECKPOINT_FILE"
-}
-
-jsonl_to_messages_json() {
-    local f="$1"
-    jq -s '
-      map(select(.type == "message" and (.message.role == "user" or .message.role == "assistant")))
-      | map({
-          role: .message.role,
-          content: (.message.content
-            | if type == "string" then .
-              elif type == "array" then (map(select(.type == "text") | .text) | join("\n"))
-              else "" end)
-        })
-      | map(select(.content != null and (.content | length) > 0))
-    ' <"$f"
-}
-
-# 参数：sk1 path1 ckpt1 sk2 path2 ckpt2 …
-# 返回: {count: N, data: [...], stripped: [{role,content}]} - 一次 jq 完成过滤、排序、标记、计数
-merged_jsonl_new_messages_json() {
-    local tmpdir sk f ck part_files i
-    tmpdir=$(mktemp -d)
-    part_files=()
-    i=0
-    while [ "$#" -ge 3 ]; do
-        sk="$1"
-        f="$2"
-        ck="$3"
-        shift 3
-        [ -f "$f" ] || continue
-        jq -c --arg sk "$sk" --arg ck "$ck" '
-          select(.type == "message" and (.message.role == "user" or .message.role == "assistant"))
-          | select( (($ck | length) == 0) or ((.timestamp // "") > $ck) )
-          | {
-              ts: (.timestamp // ""),
-              role: .message.role,
-              content: (.message.content
-                | if type == "string" then .
-                  elif type == "array" then (map(select(.type == "text") | .text) | join("\n"))
-                  else "" end),
-              sk: $sk
-            }
-          | select(.content != null and (.content | length) > 0)
-          # ========== 噪声过滤：不包含以下任意噪声关键词才保留 ==========
-          | select(
-              (.content | length > 3) and (
-                ( .content | contains("[heartbeat") | not )
-                and ( .content | contains("heartbeat poll") | not )
-                and ( .content | contains("HEARTBEAT") | not )
-                and ( .content | contains("[tool") | not )
-                and ( .content | contains("toolCall") | not )
-                and ( .content | contains("tool_call_id") | not )
-                and ( .content | contains("Sender (untrusted") | not )
-                and ( .content | contains("[system") | not )
-                and ( .content | contains("[SYSTEM") | not )
-                and ( .content | contains("[MCP") | not )
-                and ( .content | contains("[Spinner") | not )
-                and ( .content | contains("<<<") | not )
-                and ( .content | contains(">>>") | not )
-                and ( .content | test("^\\s*\\{\"") | not )
-              )
-            )
-        ' "$f" >"$tmpdir/p${i}.jsonl"
-        part_files+=("$tmpdir/p${i}.jsonl")
-        i=$((i + 1))
-    done
-    if [ ${#part_files[@]} -eq 0 ]; then
-        rm -rf "$tmpdir"
-        echo '{"count":0,"data":[],"stripped":[]}'
-        return
-    fi
-    cat "${part_files[@]}" | jq -s --argjson nparts "${#part_files[@]}" '
-      sort_by(.ts)
-      | map(
-          if ($nparts > 1) then .content = ("[" + .sk + "] " + .content) else . end
-        )
-      | {count: length, data: ., stripped: map({role, content})}
-    '
-    rm -rf "$tmpdir"
 }
 
 # 距上次成功写入 memory 的时间（秒）；由 do_archive 在写入后更新 .last_archive_ts
@@ -651,58 +558,40 @@ do_reconcile() {
 do_archive() {
     load_config || exit 1
     inject_lexicon
-    # Fix 3B: 自动扫一次 .pending → 补档。#1: never let a reconcile error (e.g. a
-    # corrupt sidecar) abort the actual archive — degrade to a warning.
-    do_reconcile || log "[WARN] reconcile 跳过(异常),不影响本次归档"
-    finalize_empty_previous_day
-    run_log_maintenance
     resolve_session_key
     load_merge_session_keys
     [ -n "${CLI_SESSION_KEY:-}" ] && SESSION_MERGE_KEYS=("$CLI_SESSION_KEY") && SESSION_KEY="$CLI_SESSION_KEY"
 
-    [ -f "$SESSIONS_JSON" ] || {
-        log "[ERROR] 无 sessions.json: $SESSIONS_JSON"
-        exit 1
-    }
-
-    # 一次性读取所有 key 的 sessionFile 和 usage，避免多次遍历 sessions.json
-    local sessions_snapshot sk_json sk jsonl u rep_entry pk_log found_sk
-    sessions_snapshot=$(mktemp)
-    chmod 600 "$sessions_snapshot"
-    # 构建 jq 查询参数：--argjson keys '["k1","k2"]' -> {k1: .k1, k2: .k2} 过滤后输出
+    local sk_json store_snapshot sk u rep_entry pk_log entry
     sk_json=$(printf '%s\n' "${SESSION_MERGE_KEYS[@]}" | jq -R . | jq -s .)
-    jq -c --argjson keys "$sk_json" '
-      [to_entries[] | select(.key as $k | $keys | index($k))]
-      | map({key, sessionFile: .value.sessionFile,
-             inputTokens: (.value.inputTokens // 0),
-             totalTokens: (.value.totalTokens // 0),
-             totalTokensFresh: (.value.totalTokensFresh // false)})
-    ' "$SESSIONS_JSON" >"$sessions_snapshot"
-
+    if ! store_snapshot=$(python3 "$SCRIPT_DIR/session-store.py" snapshot \
+        --agent "$AGENT_ID" --home "$OPENCLAW_HOME" --legacy-store "$SESSIONS_JSON" \
+        --checkpoint "$MERGE_CHECKPOINT_FILE" --keys-json "$sk_json" 2>>"$LOG_FILE"); then
+        log "[ERROR] 会话存储读取失败；未写 memory、未推进检查点、未 compact（详情见上方）"
+        return 1
+    fi
+    SESSION_STORE_CHECKPOINT=$(printf '%s\n' "$store_snapshot" | jq -c '.checkpoint')
     MERGE_PAIR_KEYS=()
-    MERGE_PAIR_PATHS=()
     declare -A SESSION_USAGE_BY_KEY=()
     declare -A SESSION_ENTRY_CACHE=()
-
     while IFS= read -r entry; do
         sk=$(echo "$entry" | jq -r '.key')
-        jsonl=$(echo "$entry" | jq -r '.sessionFile // empty')
-        if [ -z "$jsonl" ] || [ ! -f "$jsonl" ]; then
-            log "[WARN] sessionFile 无效，跳过: $sk"
-            continue
-        fi
         u=$(echo "$entry" | jq -r 'if (.totalTokensFresh == false) then (.inputTokens // 0) else (.totalTokens // .inputTokens // 0) end')
         SESSION_USAGE_BY_KEY["$sk"]=$u
         SESSION_ENTRY_CACHE["$sk"]="$entry"
         MERGE_PAIR_KEYS+=("$sk")
-        MERGE_PAIR_PATHS+=("$jsonl")
-    done < <(jq -c '.[]' "$sessions_snapshot")
-    rm -f "$sessions_snapshot"
-
+    done < <(printf '%s\n' "$store_snapshot" | jq -c '.sessions[]')
     [ ${#MERGE_PAIR_KEYS[@]} -gt 0 ] || {
-        log "[ERROR] 无可用 jsonl（列表: ${SESSION_MERGE_KEYS[*]}）"
-        exit 1
+        log "[ERROR] 无可用会话（列表: ${SESSION_MERGE_KEYS[*]}）"
+        return 1
     }
+    log "[INFO] session_backend=$(printf '%s\n' "$store_snapshot" | jq -r '.backend')"
+
+    # Fix 3B: only reconcile after storage validation; a read failure must not
+    # mutate memory. #1: a corrupt pending sidecar must not abort this archive.
+    do_reconcile || log "[WARN] reconcile 跳过(异常),不影响本次归档"
+    finalize_empty_previous_day
+    run_log_maintenance
 
     USAGE_TOKENS=0
     rep_entry=""
@@ -730,17 +619,17 @@ do_archive() {
 
     should_run_archive || exit 0
 
-    local merge_args merge_result msg_count messages_all messages_stripped messages_slice _i ck
-    merge_args=()
-    for _i in "${!MERGE_PAIR_KEYS[@]}"; do
-        ck=$(merge_checkpoint_get "${MERGE_PAIR_KEYS[$_i]}")
-        merge_args+=("${MERGE_PAIR_KEYS[$_i]}" "${MERGE_PAIR_PATHS[$_i]}" "$ck")
-    done
-    merge_result=$(merged_jsonl_new_messages_json "${merge_args[@]}")
+    local merge_result msg_count messages_all messages_stripped messages_slice
+    merge_result="$store_snapshot"
+    unset store_snapshot
     msg_count=$(echo "$merge_result" | jq -r '.count')
     if [ "${msg_count:-0}" -eq 0 ]; then
         log "[INFO] 检查点之后无新增 user/assistant 消息，跳过合并与摘要"
-        run_compact
+        # Materialize a legacy timestamp into identities even on an empty run.
+        # Otherwise the next late/equal-timestamp append could be bootstrapped
+        # away again. There is no pending output in this validated snapshot.
+        merge_checkpoint_bump_from_messages '[]'
+        # Nothing new to archive; do not mutate the source store on a read-only pass.
         exit 0
     fi
 
@@ -761,7 +650,7 @@ do_archive() {
 
     if [ "$bypass_min_new" != "1" ] && [ "${msg_count:-0}" -lt "$MIN_NEW_MESSAGES" ]; then
         log "[INFO] 新增消息 ${msg_count} < min_new_messages=${MIN_NEW_MESSAGES}，累积后再归档（不写 memory、不推进检查点）；超阈值 / 定期间隔触发时可放宽"
-        run_compact
+        # Deferred messages are still unarchived: compacting here loses them.
         exit 0
     fi
 

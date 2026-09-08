@@ -45,9 +45,9 @@ grep -q 'finalize_empty_previous_day' "$SCRIPT_DIR/archive-engine.sh" || fail "f
 pass "finalize_empty_previous_day present"
 
 # 6. Part B 行为测试：模拟跨日场景
-TMPDIR=$(mktemp -d)
-export DAILY_MEMORY_CONFIG_DIR="$TMPDIR/cfg"
-export DAILY_MEMORY_MEMORY_DIR="$TMPDIR/mem"
+WAVE_TEST_DIR=$(mktemp -d)
+export DAILY_MEMORY_CONFIG_DIR="$WAVE_TEST_DIR/cfg"
+export DAILY_MEMORY_MEMORY_DIR="$WAVE_TEST_DIR/mem"
 mkdir -p "$DAILY_MEMORY_CONFIG_DIR" "$DAILY_MEMORY_MEMORY_DIR"
 
 # 6a. source archive-engine 函数（不便完整跑 archive，load_config 会因缺 sessions.json 失败）
@@ -93,7 +93,7 @@ else
     fail ".last_active_day is $active_day, expected $today"
 fi
 
-rm -rf "$TMPDIR"
+rm -rf "$WAVE_TEST_DIR"
 
 # 6d. W10.1-D 心跳噪声断言：slot_has_substance + is_noise_message
 hb='[{"role":"user","content":"[OpenClaw heartbeat poll]"},{"role":"assistant","content":"Disk 37%，无 pending 子会话。\n\nHEARTBEAT_OK"}]'
@@ -104,7 +104,7 @@ if is_noise_message "[OpenClaw heartbeat poll]" 2>/dev/null; then pass "[OpenCla
 
 # 7. 回归测试（直接调用各回归脚本，不回调 self-check.sh 避免递归）
 if [ -x "$SCRIPT_DIR/test-fail-guard.sh" ]; then
-    bash "$SCRIPT_DIR/test-fail-guard.sh" >/dev/null 2>&1 || fail "fail-guard regression"
+    bash "$SCRIPT_DIR/test-fail-guard.sh" --structural-only >/dev/null 2>&1 || fail "fail-guard regression"
     pass "fail-guard regression OK"
 fi
 
