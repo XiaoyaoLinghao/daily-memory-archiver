@@ -1,6 +1,8 @@
 # Daily Memory Archiver
 
-OpenClaw 会话归档 Skill：多 session 按时间合并、检查点增量、本地关键词提取、可选云端 LLM 摘要、按 key 用量触发与选择性 `sessions.compact`。
+OpenClaw 会话归档 Skill：原生读取 OpenClaw SQLite 或旧版 JSONL 会话，多 session 按时间合并、检查点增量、本地关键词提取、可选云端 LLM 摘要、按 key 用量触发与选择性 `sessions.compact`。
+
+[最新正式版：v1.7.0](https://github.com/XiaoyaoLinghao/daily-memory-archiver/releases/tag/v1.7.0)
 
 **面向维护者**：本文描述仓库布局、配置键、入口脚本与扩展点。面向 Cursor / 助手的交互说明见根目录 **[SKILL.md](./SKILL.md)**（安装、配对、cron、**全局 skills vs workspace/skills**、迁移清单等）。
 
@@ -8,11 +10,43 @@ OpenClaw 会话归档 Skill：多 session 按时间合并、检查点增量、�
 
 ## 版本与兼容
 
-- **当前候选：1.7.0**（`config_version: "8"`，实现 `KW_MEMORY_FILE_SPEC` v1.1）：新增 SQLite 原生读取与跨存储增量检查点；保留结构化事实交接与项目词表注入。
+- **当前正式版：1.7.0**（`config_version: "8"`，实现 `KW_MEMORY_FILE_SPEC` v1.1）：新增 SQLite 原生读取与跨存储增量检查点；保留结构化事实交接与项目词表注入。
 - 实现与 **SKILL.md** 中 `skill_version` / `config.yaml` 中 `config_version` 应对齐；以脚本行为为准。
 - config schema 未变（lexicon 为 env 变量，非 config.yaml 键），故 `config_version` 保持 `8`。
 - Shell：**bash 4+**（使用关联数组 `declare -A`），Python **3.9+**（含标准库 `sqlite3`）、jq。
 - 安装、迁移、离线路径与回退步骤见 **[SQLite 升级说明](docs/sqlite-upgrade.md)**。
+
+## 安装与升级
+
+新安装建议将正式版放在 OpenClaw 工作区 skills 目录：
+
+```bash
+git clone --branch v1.7.0 --depth 1 \
+  https://github.com/XiaoyaoLinghao/daily-memory-archiver.git \
+  "$HOME/.openclaw/workspace/skills/daily-memory-archiver"
+cd "$HOME/.openclaw/workspace/skills/daily-memory-archiver"
+bash scripts/self-check.sh
+```
+
+从 1.6.x 升级时，先暂停 DMA 定时任务并等待当前归档结束，备份整个 `config/`（包括隐藏的检查点文件）和 memory 目录，再更新代码。不要用空配置覆盖原有配置。完整迁移及回退边界见 **[SQLite 升级说明](docs/sqlite-upgrade.md)**。
+
+升级后先核对 agent 和完整 session key：
+
+```bash
+openclaw sessions --agent main --limit all --json
+```
+
+将实际 key 写入 `config/config.yaml` 的 `session.merge_jsonl_keys`。首次归档建议先禁用 compact，并只验证一个实际存在的会话：
+
+```bash
+SKIP_SESSION_COMPACT=1 \
+  bash scripts/archive-engine.sh archive --force \
+  --agent main --session 'agent:main:main'
+```
+
+再次执行同一命令应不重复写入。确认输出、日志及 `config/.archive_merge_checkpoint.json` 后，再恢复正式调度和 compact。生产数据验收仍应在实际 OpenClaw 主机完成。
+
+默认 `DAILY_MEMORY_SESSION_BACKEND=auto`：优先使用 OpenClaw 发现到的 SQLite，旧 `sessions.json` + JSONL 继续作为兼容路径。SQLite 模式使用只读连接并检查受支持的 schema；当前支持 OpenClaw agent schema 19，未知版本会明确失败。
 
 ## 仓库布局
 
@@ -87,6 +121,10 @@ bash scripts/archive-engine.sh log-maintenance
 | 变量 | 作用 |
 |:---|:---|
 | `OPENCLAW_HOME` | 默认 `~/.openclaw` |
+| `OPENCLAW_AGENT_ID` | 覆盖要读取的 agent ID |
+| `DAILY_MEMORY_SESSION_BACKEND` | `auto`（默认）/ `sqlite` / `jsonl` |
+| `DAILY_MEMORY_SQLITE_PATH` | 显式指定只读 SQLite 文件，供离线或自定义路径使用 |
+| `SESSIONS_JSON` | 旧 JSONL 索引路径，亦作为官方 CLI 的 legacy selector |
 | `DAILY_MEMORY_CONFIG_DIR` | skill `config/` |
 | `DAILY_MEMORY_LOG` | 日志文件路径 |
 | `DAILY_MEMORY_LOG_MAX_BYTES` 等 | 见上表 |
