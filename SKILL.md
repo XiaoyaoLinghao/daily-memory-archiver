@@ -1,10 +1,10 @@
 ---
 name: daily-memory-archiver
-skill_version: "1.7.0"
+skill_version: "1.7.1"
 config_version: "8"
 spec_version: "1.1"
 description: |
-  Daily Memory Archiver v1.7.0 — OpenClaw 会话归档：按 session key 统计用量、检查点后仅合并新增消息、可选分块云端摘要、默认仅对超限 key 执行 sessions.compact。推荐根目录 ~/.openclaw/workspace/skills/daily-memory-archiver（自维护）；亦支持 ~/.openclaw/skills/daily-memory-archiver（全局）。
+  Daily Memory Archiver v1.7.1 — OpenClaw 会话归档：按 session key 统计用量、检查点后仅合并新增消息、可选分块云端摘要、默认仅对超限 key 执行 sessions.compact，并发布供健康检查消费的运行状态证据。推荐根目录 ~/.openclaw/workspace/skills/daily-memory-archiver（自维护）；亦支持 ~/.openclaw/skills/daily-memory-archiver（全局）。
 
   **必须读取本 Skill 时**：安装/配置 API、定时归档、credentials.enc、merge_jsonl_keys、检查点、pairing、多通道、get-cloud-creds、archive-engine。
 
@@ -15,7 +15,7 @@ description: |
 
 # Daily Memory Archiver
 
-**文档与实现版本：1.7.0**（版本唯一来源为本文件 frontmatter；`config.yaml` 与正文同步镜像。）
+**文档与实现版本：1.7.1**（版本唯一来源为本文件 frontmatter；`config.yaml` 与正文同步镜像。）
 
 原生存储适配、检查点升级与回退边界见 [升级说明](docs/sqlite-upgrade.md)。需要 Python 3.9+（含 sqlite3）。
 
@@ -237,7 +237,7 @@ logging:
 output:
   memory_dir: "~/.openclaw/workspace/memory"
 
-skill_version: "1.7.0"
+skill_version: "1.7.1"
 config_version: "8"
 ```
 

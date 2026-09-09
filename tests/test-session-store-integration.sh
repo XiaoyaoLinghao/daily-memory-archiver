@@ -57,7 +57,7 @@ logging:
 output:
   memory_dir: "~/.openclaw/workspace/memory"
   raw_detail: "fallback_only"
-skill_version: "1.7.0"
+skill_version: "1.7.1"
 config_version: "8"
 ''', encoding="utf-8")
 PY
