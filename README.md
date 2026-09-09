@@ -1,5 +1,34 @@
 # Daily Memory Archiver
 
+## Runtime status for KW health monitoring
+
+The additive [DMA runtime status v1 contract](docs/DMA_RUNTIME_STATUS_V1.md) supplies
+operational evidence without changing Memory SPEC v1.1, archive selection, summarization,
+noise filtering or compaction policy. The archive engine publishes an atomic JSON record
+at `DAILY_MEMORY_STATUS_PATH`, defaulting to `config/.runtime_status.json` under the
+resolved `DAILY_MEMORY_CONFIG_DIR` (or this installation's config directory).
+
+The record distinguishes running, archived, idle, noise-only, deferred, failed and
+partial runs. Pending messages are observations from that run's validated snapshot,
+not a continuously updated queue length. Per-operation failures are reset only by
+success of the same operation; idle/noise-only runs cannot prove summary recovery.
+`last_archived_at` excludes noise-only and partial output. Checkpoint progress is based
+on content changes, not mtime. Status evidence errors remain visible to the consumer.
+
+Status publication requires the existing `flock` archive lock. Without `flock`, DMA
+retains its previous archive behavior, emits a monitoring-unavailable diagnostic and
+does not publish an unsafe concurrent status record. No replacement lock is introduced.
+
+Deploy `scripts/archive-engine.sh`, `scripts/lib/runtime-status.sh` and
+`scripts/runtime-status.py` together from the same reviewed revision. KW requires its
+matching status reader and report wrapper; see the contract for rollout and validation.
+The existing `health-check` command is a separate limited Memory/retry diagnostic and
+does not replace the runtime record. Status contains no raw conversations or credentials.
+
+This change does not migrate the session or knowledge database, replay historical Memory,
+or deploy itself. Start development from the SQLite-capable v1.7.0 baseline or newer;
+do not overwrite an existing v1.7.0 installation with a stale development checkout.
+
 OpenClaw 会话归档 Skill：原生读取 OpenClaw SQLite 或旧版 JSONL 会话，多 session 按时间合并、检查点增量、本地关键词提取、可选云端 LLM 摘要、按 key 用量触发与选择性 `sessions.compact`。
 
 [最新正式版：v1.7.0](https://github.com/XiaoyaoLinghao/daily-memory-archiver/releases/tag/v1.7.0)
