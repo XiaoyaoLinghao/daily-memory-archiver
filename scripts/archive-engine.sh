@@ -19,6 +19,8 @@ source "$SCRIPT_DIR/lib/log-maintenance.sh"
 source "$SCRIPT_DIR/lib/config-loader.sh"
 # shellcheck source=lib/conversation-noise.sh
 source "$SCRIPT_DIR/lib/conversation-noise.sh"
+# shellcheck source=lib/runtime-status.sh
+source "$SCRIPT_DIR/lib/runtime-status.sh"
 
 LOCAL_EXTRACTOR="$SCRIPT_DIR/extractors/local-extractor.sh"
 CLOUD_SUMMARIZER="$SCRIPT_DIR/summarizers/cloud-summarizer.sh"
@@ -449,6 +451,12 @@ do_reconcile() {
     [ -n "$sidecars" ] || { log "[INFO] reconcile: 无待补 sidecar"; return 0; }
 
     if ! cloud_summarizer_enabled || [ ! -f "$CONFIG_DIR/credentials.enc" ]; then
+        # Existing sidecars are unresolved summary work.  A disabled cloud
+        # summarizer is not itself an error when there is no sidecar, but it
+        # cannot recover one that is already pending.
+        if [ -n "$sidecars" ]; then
+            runtime_status_note_summary failed
+        fi
         log "[INFO] reconcile: cloud_summarizer 禁用或无凭据，跳过"
         return 0
     fi
@@ -459,6 +467,7 @@ do_reconcile() {
     api_tok=$(echo "$API_JSON" | jq -r .api_token)
     model_id=$(echo "$API_JSON" | jq -r .model)
     if [ -z "$api_url" ] || [ "$api_url" = "null" ] || [ -z "$api_tok" ] || [ "$api_tok" = "null" ] || [ -z "$model_id" ] || [ "$model_id" = "null" ]; then
+        runtime_status_note_summary failed
         log "[WARN] reconcile: 凭据不完整，跳过"
         return 0
     fi
@@ -471,6 +480,7 @@ do_reconcile() {
         # — wedging all archiving. Validate first and skip bad ones.
         if ! jq -e 'type=="array"' "$sc" >/dev/null 2>&1; then
             log "[WARN] reconcile: sidecar $sc 非法/截断 JSON，跳过（保留待人工检查）"
+            runtime_status_add_error corrupt_reconcile_sidecar
             continue
         fi
         local bn
@@ -480,6 +490,7 @@ do_reconcile() {
         md_file="$MEMORY_DIR/${day}.md"
         if [ ! -f "$md_file" ]; then
             log "[WARN] reconcile: .md 不存在 $md_file，删除孤儿 sidecar $sc"
+            runtime_status_add_error orphan_reconcile_sidecar
             rm -f "$sc"
             continue
         fi
@@ -502,6 +513,7 @@ do_reconcile() {
         jq -r '.[] | "\(.role): \(.content)"' "$sc" | tr -d '\000' | head -c 120000 >"$tmp_plain"
 
         if cloud_out=$("$CLOUD_SUMMARIZER" --file "$tmp_plain" "openai-compatible" "$model_id" "$api_url" "$api_tok" 2>>"$LOG_FILE"); then
+            [ "$RUNTIME_STATUS_SUMMARY_RESULT" = "failed" ] || runtime_status_note_summary success
             # 成功：用 ### 摘要 就地替换 .md 中对应 ## HH:MM 的 ### 原始细节(待补) 块
             # 幂等：用 ## HH:MM + (待补) 双标记锚定
             local tmp_md
@@ -549,6 +561,7 @@ do_reconcile() {
             rm -f "$sc"
             log "[INFO] reconcile: ${day}_${hhmm} 补档成功，sidecar 已删除"
         else
+            runtime_status_note_summary failed
             log "[WARN] reconcile: ${day}_${hhmm} 云端调用失败，保留 sidecar 待下次重试"
         fi
         rm -f "$tmp_plain"
@@ -556,7 +569,15 @@ do_reconcile() {
 }
 
 do_archive() {
-    load_config || exit 1
+    # Runtime status begins only after the caller has acquired the archive
+    # lock.  A competing invocation therefore cannot overwrite the owner's
+    # running/terminal record.
+    runtime_status_begin
+    if ! load_config; then
+        runtime_status_add_error config_load_failed
+        runtime_status_mark failed archive null
+        exit 1
+    fi
     inject_lexicon
     resolve_session_key
     load_merge_session_keys
@@ -568,8 +589,11 @@ do_archive() {
         --agent "$AGENT_ID" --home "$OPENCLAW_HOME" --legacy-store "$SESSIONS_JSON" \
         --checkpoint "$MERGE_CHECKPOINT_FILE" --keys-json "$sk_json" 2>>"$LOG_FILE"); then
         log "[ERROR] 会话存储读取失败；未写 memory、未推进检查点、未 compact（详情见上方）"
+        runtime_status_note_storage failed
+        runtime_status_mark failed storage null
         return 1
     fi
+    runtime_status_note_storage success
     SESSION_STORE_CHECKPOINT=$(printf '%s\n' "$store_snapshot" | jq -c '.checkpoint')
     MERGE_PAIR_KEYS=()
     declare -A SESSION_USAGE_BY_KEY=()
@@ -583,6 +607,8 @@ do_archive() {
     done < <(printf '%s\n' "$store_snapshot" | jq -c '.sessions[]')
     [ ${#MERGE_PAIR_KEYS[@]} -gt 0 ] || {
         log "[ERROR] 无可用会话（列表: ${SESSION_MERGE_KEYS[*]}）"
+        runtime_status_note_storage failed
+        runtime_status_mark failed storage null
         return 1
     }
     log "[INFO] session_backend=$(printf '%s\n' "$store_snapshot" | jq -r '.backend')"
@@ -617,11 +643,14 @@ do_archive() {
 
     log "[INFO] session_merge=[$SESSION_MERGE_LABEL] usage_max=$USAGE_TOKENS | per_key: $pk_log | rep_input=$INPUT_TOKENS_RAW rep_total=$TOTAL_TOKENS_RAW fresh=$TOTAL_FRESH trigger=$TRIGGER_MODE"
 
-    should_run_archive || exit 0
-
     local merge_result msg_count messages_all messages_stripped messages_slice
     merge_result="$store_snapshot"
     unset store_snapshot
+    runtime_status_mark_pending_from_snapshot "$merge_result"
+    if ! should_run_archive; then
+        runtime_status_mark deferred threshold "$RUNTIME_STATUS_PENDING_COUNT" "$RUNTIME_STATUS_OLDEST_PENDING_AT"
+        exit 0
+    fi
     msg_count=$(echo "$merge_result" | jq -r '.count')
     if [ "${msg_count:-0}" -eq 0 ]; then
         log "[INFO] 检查点之后无新增 user/assistant 消息，跳过合并与摘要"
@@ -630,6 +659,7 @@ do_archive() {
         # away again. There is no pending output in this validated snapshot.
         merge_checkpoint_bump_from_messages '[]'
         # Nothing new to archive; do not mutate the source store on a read-only pass.
+        runtime_status_mark idle no_input 0
         exit 0
     fi
 
@@ -640,6 +670,7 @@ do_archive() {
         merge_checkpoint_bump_from_messages "$messages_all"
         date +%s >"$CONFIG_DIR/.last_archive_ts"
         run_compact
+        runtime_status_mark noise_only noise_only 0
         exit 0
     fi
 
@@ -651,6 +682,7 @@ do_archive() {
     if [ "$bypass_min_new" != "1" ] && [ "${msg_count:-0}" -lt "$MIN_NEW_MESSAGES" ]; then
         log "[INFO] 新增消息 ${msg_count} < min_new_messages=${MIN_NEW_MESSAGES}，累积后再归档（不写 memory、不推进检查点）；超阈值 / 定期间隔触发时可放宽"
         # Deferred messages are still unarchived: compacting here loses them.
+        runtime_status_mark deferred min_messages "$RUNTIME_STATUS_PENDING_COUNT" "$RUNTIME_STATUS_OLDEST_PENDING_AT"
         exit 0
     fi
 
@@ -715,10 +747,15 @@ do_archive() {
                         sect=$((cidx + 1))
                         echo "$chunk_json" | jq -r '.[] | "\(.role): \(.content)"' >"$tmp_plain"
                         if cloud_out=$("$CLOUD_SUMMARIZER" --file "$tmp_plain" "openai-compatible" "$model_id" "$api_url" "$api_tok" 2>>"$LOG_FILE"); then
+                            # A later chunk failure must not be hidden by an
+                            # earlier successful chunk.  Preserve a failure
+                            # until the next run proves summary recovery.
+                            [ "$RUNTIME_STATUS_SUMMARY_RESULT" = "failed" ] || runtime_status_note_summary success
                             cloud_block+="##### 云端段 ${sect}/${used_chunks}（消息序号 ${start}–${cend}）"$'\n\n'"$cloud_out"$'\n\n'
                         else
                             cloud_block+="- *DMA-ERR: chunk ${sect}/${used_chunks} summary failed*"$'\n\n'
                             cloud_recoverable_fail=1
+                            runtime_status_note_summary failed
                         fi
                         cidx=$((cidx + 1))
                     done
@@ -730,10 +767,12 @@ do_archive() {
                     fi
                     echo "$messages_slice" | jq -r '.[] | "\(.role): \(.content)"' >"$tmp_plain"
                     if cloud_out=$("$CLOUD_SUMMARIZER" --file "$tmp_plain" "openai-compatible" "$model_id" "$api_url" "$api_tok" 2>>"$LOG_FILE"); then
+                        [ "$RUNTIME_STATUS_SUMMARY_RESULT" = "failed" ] || runtime_status_note_summary success
                         cloud_block=$cloud_out
                     else
                         cloud_block="- *DMA-ERR: cloud summary failed (see log)*"
                         cloud_recoverable_fail=1
+                        runtime_status_note_summary failed
                     fi
                 fi
             else
@@ -745,6 +784,7 @@ do_archive() {
                     cloud_block="- *DMA-ERR: no credentials (set env vars or config/credentials.enc)*"
                 fi
                 cloud_recoverable_fail=1
+                runtime_status_note_summary failed
             fi
             rm -f "$tmp_plain"
         else
@@ -805,7 +845,14 @@ do_archive() {
                     echo ""
                 } >>"$fpath"
                 finalize_archive_bookkeeping
+                runtime_status_note_archive success
+                # The source/checkpoint commit is partial because summary
+                # reconciliation is still pending; it is not a successful
+                # substantive archive for last_archived_at purposes.
+                runtime_status_mark partial summary 0 "" 0
                 log "[INFO] 已写入 $fpath（待补归档）+ sidecar $sidecar_path；已更新合并检查点 $MERGE_CHECKPOINT_FILE"
+            else
+                runtime_status_mark failed summary "$RUNTIME_STATUS_PENDING_COUNT" "$RUNTIME_STATUS_OLDEST_PENDING_AT"
             fi
         else
             # 正常路径：云端成功或 cloud_summarizer 禁用
@@ -840,6 +887,7 @@ do_archive() {
                     log "[INFO] Fix1b 哨兵后闸：判为空时段(无知识 tag)，不写块，推进 checkpoint + compact"
                     finalize_archive_bookkeeping
                     run_compact
+                    runtime_status_mark noise_only noise_only 0
                     exit 0
                 fi
             fi
@@ -917,11 +965,14 @@ do_archive() {
                     log "[INFO] cloud_summarizer 禁用，已写入 $fpath（最终原始细节，无待补/无 sidecar）"
                 fi
                 finalize_archive_bookkeeping
+                runtime_status_note_archive success
+                runtime_status_mark archived substantive 0 "" 1
                 log "[INFO] 已写入 $fpath；已更新合并检查点 $MERGE_CHECKPOINT_FILE"
             fi
         fi
     else
         log "[INFO] 跳过 memory（冷却）"
+        runtime_status_mark deferred cooldown "$RUNTIME_STATUS_PENDING_COUNT" "$RUNTIME_STATUS_OLDEST_PENDING_AT"
     fi
 
     # compact 仅在非可恢复失败、且本周期确实写入/推进了 checkpoint 时执行。
@@ -942,10 +993,16 @@ do_log_maintenance_only() {
 
 with_lock() {
     if command -v flock >/dev/null 2>&1; then
+        RUNTIME_STATUS_LOCK_AVAILABLE=1
         flock -n 9 || {
             log "[WARN] 另一实例运行中"
             exit 0
         }
+    else
+        # Keep the historical archive behavior on platforms without flock,
+        # but never publish a v1 status record without an owned lock.
+        RUNTIME_STATUS_LOCK_AVAILABLE=0
+        log "[WARN] 当前平台缺少 flock，runtime status 暂停发布；归档继续按原策略执行"
     fi
     "$@"
 }
@@ -993,5 +1050,6 @@ main_cli() {
 
 # 仅在被直接执行时运行 CLI；被 source 时只导出函数，便于测试单独调用
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    trap 'rc=$?; runtime_status_on_exit "$rc"; exit "$rc"' EXIT
     main_cli "$@"
 fi
