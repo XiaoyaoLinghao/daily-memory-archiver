@@ -26,12 +26,12 @@ The existing `health-check` command is a separate limited Memory/retry diagnosti
 does not replace the runtime record. Status contains no raw conversations or credentials.
 
 This change does not migrate the session or knowledge database, replay historical Memory,
-or deploy itself. Start development from the SQLite-capable v1.7.0 baseline or newer;
-do not overwrite an existing v1.7.0 installation with a stale development checkout.
+or deploy itself. Start development from the SQLite-capable v1.7.1 baseline or newer;
+do not overwrite an existing v1.7.1 installation with a stale development checkout.
 
 OpenClaw 会话归档 Skill：原生读取 OpenClaw SQLite 或旧版 JSONL 会话，多 session 按时间合并、检查点增量、本地关键词提取、可选云端 LLM 摘要、按 key 用量触发与选择性 `sessions.compact`。
 
-[最新正式版：v1.7.0](https://github.com/XiaoyaoLinghao/daily-memory-archiver/releases/tag/v1.7.0)
+[最新正式版：v1.7.1](https://github.com/XiaoyaoLinghao/daily-memory-archiver/releases/tag/v1.7.1)
 
 **面向维护者**：本文描述仓库布局、配置键、入口脚本与扩展点。面向 Cursor / 助手的交互说明见根目录 **[SKILL.md](./SKILL.md)**（安装、配对、cron、**全局 skills vs workspace/skills**、迁移清单等）。
 
@@ -39,7 +39,7 @@ OpenClaw 会话归档 Skill：原生读取 OpenClaw SQLite 或旧版 JSONL 会�
 
 ## 版本与兼容
 
-- **当前正式版：1.7.0**（`config_version: "8"`，实现 `KW_MEMORY_FILE_SPEC` v1.1）：新增 SQLite 原生读取与跨存储增量检查点；保留结构化事实交接与项目词表注入。
+- **当前正式版：1.7.1**（`config_version: "8"`，实现 `KW_MEMORY_FILE_SPEC` v1.1）：在 SQLite 原生读取与跨存储增量检查点基础上，增加 DMA 运行状态观测，区分已恢复、空闲、噪声、待处理与失败，避免将历史错误和无新增 Memory 文件误报为当前故障。
 - 实现与 **SKILL.md** 中 `skill_version` / `config.yaml` 中 `config_version` 应对齐；以脚本行为为准。
 - config schema 未变（lexicon 为 env 变量，非 config.yaml 键），故 `config_version` 保持 `8`。
 - Shell：**bash 4+**（使用关联数组 `declare -A`），Python **3.9+**（含标准库 `sqlite3`）、jq。
@@ -50,7 +50,7 @@ OpenClaw 会话归档 Skill：原生读取 OpenClaw SQLite 或旧版 JSONL 会�
 新安装建议将正式版放在 OpenClaw 工作区 skills 目录：
 
 ```bash
-git clone --branch v1.7.0 --depth 1 \
+git clone --branch v1.7.1 --depth 1 \
   https://github.com/XiaoyaoLinghao/daily-memory-archiver.git \
   "$HOME/.openclaw/workspace/skills/daily-memory-archiver"
 cd "$HOME/.openclaw/workspace/skills/daily-memory-archiver"
